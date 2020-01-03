@@ -7,12 +7,15 @@ extern crate serde_json;
 extern crate walkdir;
 
 use clap::{App, AppSettings, SubCommand};
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, Write};
+use std::time::{Duration, Instant};
 
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
@@ -30,6 +33,8 @@ lazy_static! {
          component: "
     )
     .unwrap();
+    static ref VAR_RE: Regex =
+        Regex::new("([_A-Za-z][_0-9A-Za-z]*): *([0-9]+|\"[^\"]*\")").unwrap();
 }
 
 pub fn die(msg: &str) -> ! {
@@ -51,6 +56,7 @@ struct QueryInfo {
     total_time: u64,
     max_time: u64,
     max_uuid: String,
+    max_variables: Option<String>,
     slow_count: u64,
     calls: u64,
     id: i32,
@@ -65,17 +71,19 @@ impl QueryInfo {
             total_time: 0,
             max_time: 0,
             max_uuid: "(none)".to_owned(),
+            max_variables: None,
             slow_count: 0,
             calls: 0,
         }
     }
 
-    fn add(&mut self, time: u64, query_id: &str) {
+    fn add(&mut self, time: u64, query_id: &str, variables: Option<String>) {
         self.calls += 1;
         self.total_time += time;
         if time > self.max_time {
             self.max_time = time;
             self.max_uuid = query_id.to_owned();
+            self.max_variables = variables;
         }
         if time > SLOW_THRESHOLD {
             self.slow_count += 1;
@@ -102,7 +110,26 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
         caps.get(i).map(|field| field.as_str())
     }
 
-    use std::time::{Duration, Instant};
+    fn canonicalize(query: &str) -> (Cow<'_, str>, Option<String>) {
+        if VAR_RE.is_match(query) {
+            let mut vars = String::new();
+            write!(&mut vars, "{{ ").unwrap();
+            let mut count = 0;
+            let query = VAR_RE.replace_all(query, |caps: &Captures| {
+                if count > 0 {
+                    write!(&mut vars, ", ").unwrap();
+                }
+
+                count += 1;
+                write!(vars, "{}{}: {}", &caps[1], count, &caps[2]).unwrap();
+                format!("{}: ${}{}", &caps[1], &caps[1], count)
+            });
+            write!(vars, " }}").unwrap();
+            (query, Some(vars))
+        } else {
+            (Cow::from(query), None)
+        }
+    }
 
     let start = Instant::now();
     let mut lines: usize = 0;
@@ -124,12 +151,13 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
                     Err(_) => continue,
                     Ok(qt) => qt,
                 };
+                let (query, variables) = canonicalize(query);
                 let hsh = hash(&query, &subgraph);
                 let info = queries.entry(hsh).or_insert({
                     count += 1;
-                    QueryInfo::new(query.to_owned(), subgraph.to_owned(), count)
+                    QueryInfo::new(query.into_owned(), subgraph.to_owned(), count)
                 });
-                info.add(query_time, &query_id);
+                info.add(query_time, &query_id, variables);
             }
         } else if print_extra {
             eprintln!("not a query: {}", line);
