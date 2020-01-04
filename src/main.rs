@@ -59,11 +59,11 @@ struct QueryInfo {
     max_variables: Option<String>,
     slow_count: u64,
     calls: u64,
-    id: i32,
+    id: usize,
 }
 
 impl QueryInfo {
-    fn new(query: String, subgraph: String, id: i32) -> QueryInfo {
+    fn new(query: String, subgraph: String, id: usize) -> QueryInfo {
         QueryInfo {
             query,
             subgraph,
@@ -93,18 +93,29 @@ impl QueryInfo {
     fn avg(&self) -> f64 {
         self.total_time as f64 / self.calls as f64
     }
-}
 
-fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
-    // Read the file line by line using the lines() iterator from std::io::BufRead.
-    let mut queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
-    let mut count: i32 = 0;
+    fn combine(&mut self, other: &QueryInfo) {
+        self.calls += other.calls;
+        self.total_time += other.total_time;
+        if other.max_time > self.max_time {
+            self.max_time = other.max_time;
+            self.max_uuid = other.max_uuid.clone();
+            self.max_variables = other.max_variables.clone();
+        }
+        self.slow_count += other.slow_count;
+    }
 
     fn hash(query: &str, subgraph: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         (query, subgraph).hash(&mut hasher);
         hasher.finish()
     }
+}
+
+fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
+    // Read the file line by line using the lines() iterator from std::io::BufRead.
+    let mut queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
+    let mut count: usize = 0;
 
     fn field<'a>(caps: &'a Captures, i: usize) -> Option<&'a str> {
         caps.get(i).map(|field| field.as_str())
@@ -152,8 +163,8 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
                     Ok(qt) => qt,
                 };
                 let (query, variables) = canonicalize(query);
-                let hsh = hash(&query, &subgraph);
-                let info = queries.entry(hsh).or_insert({
+                let hsh = QueryInfo::hash(&query, &subgraph);
+                let info = queries.entry(hsh).or_insert_with(|| {
                     count += 1;
                     QueryInfo::new(query.into_owned(), subgraph.to_owned(), count)
                 });
@@ -171,14 +182,32 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
             lines
         );
     }
-    Ok(queries.values().map(|info| info.to_owned()).collect())
+    Ok(queries.values().cloned().collect())
 }
 
-fn read_summaries(filename: &str) -> Vec<QueryInfo> {
-    let file = std::fs::File::open(filename)
-        .unwrap_or_else(|err| die(&format!("failed to open file: {}", err.to_string())));
-    serde_json::from_reader(file)
-        .unwrap_or_else(|err| die(&format!("cannot parse file as JSON: {}", err.to_string())))
+fn read_summaries(filename: &str) -> Result<Vec<QueryInfo>, std::io::Error> {
+    let file = std::fs::File::open(filename)?;
+    let reader = BufReader::new(file);
+    let mut infos = vec![];
+    for line in reader.lines() {
+        let line = line.unwrap();
+
+        let value = serde_json::from_str(&line)?;
+        infos.push(value);
+    }
+    Ok(infos)
+}
+
+fn write_summaries(infos: Vec<QueryInfo>) {
+    for info in infos {
+        let json = serde_json::to_string(&info).unwrap_or_else(|err| {
+            die(&format!(
+                "process: failed to convert to json: {}",
+                err.to_string()
+            ))
+        });
+        println!("{}", json);
+    }
 }
 
 fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
@@ -201,12 +230,12 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
     {
         writeln!(
             stdout,
-            "| {:^7} | {:^6} | {:^8} | {:^8} | {:^8} | {:^4} | {:^8} |",
+            "| {:^7} | {:^8} | {:^12} | {:^6} | {:^6} | {:^6} | {:^8} |",
             "QID", "calls", "total", "avg", "max", "slow", "uuid"
         );
         writeln!(
             stdout,
-            "|---------+--------+----------+----------+----------+------+----------|"
+            "|---------+----------+--------------+--------+--------+--------+----------|"
         );
     }
     for query in &queries {
@@ -214,7 +243,7 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
         {
             writeln!(
                 stdout,
-                "| Q{:0>6} | {:>6} | {:>8} | {:>8.0} | {:>8} | {:>4} | {:<8} |",
+                "| Q{:0>6} | {:>8} | {:>12} | {:>6.0} | {:>6} | {:>6} | {:<8} |",
                 query.id,
                 query.calls,
                 query.total_time,
@@ -265,6 +294,29 @@ fn prepare(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+fn combine(filenames: Vec<&str>) -> Vec<QueryInfo> {
+    let mut infos: BTreeMap<u64, QueryInfo> = BTreeMap::default();
+    for filename in filenames {
+        for info in read_summaries(filename).unwrap_or_else(|err| {
+            die(&format!(
+                "combine: could not read summaries from {}: {}",
+                filename,
+                err.to_string()
+            ))
+        }) {
+            let hsh = QueryInfo::hash(&info.query, &info.subgraph);
+            infos
+                .entry(hsh)
+                .and_modify(|existing| existing.combine(&info))
+                .or_insert(info);
+        }
+    }
+    for (indx, value) in infos.values_mut().enumerate() {
+        value.id = indx;
+    }
+    infos.values().cloned().collect()
+}
+
 fn main() {
     let args = App::new("qlog")
         .version("1.0")
@@ -294,6 +346,11 @@ fn main() {
                      -s, --sort=[SORT]  'Sort by this column'",
                 ),
         )
+        .subcommand(
+            SubCommand::with_name("combine")
+                .about("Combine multiple summary files into one")
+                .args_from_usage("<file>..."),
+        )
         .get_matches();
 
     match args.subcommand() {
@@ -308,19 +365,13 @@ fn main() {
                 None => false,
                 Some(args) => args.is_present("extra"),
             };
-            let queries = parse_logfile(extra).unwrap_or_else(|err| {
+            let infos = parse_logfile(extra).unwrap_or_else(|err| {
                 die(&format!(
                     "ingest: failed to parse logfile: {}",
                     err.to_string()
                 ))
             });
-            let json = serde_json::to_string_pretty(&queries).unwrap_or_else(|err| {
-                die(&format!(
-                    "ingest: failed to convert to json: {}",
-                    err.to_string()
-                ))
-            });
-            println!("{}", json);
+            write_summaries(infos);
         }
         ("stats", args) => match args {
             None => die("stats: missing arguments"),
@@ -329,10 +380,19 @@ fn main() {
                     .value_of("input")
                     .unwrap_or_else(|| die("stats: missing input file"));
                 let sort = args.value_of("sort").unwrap_or("total_time");
-                let queries = read_summaries(input);
+                let queries = read_summaries(input).unwrap_or_else(|err| {
+                    die(&format!(
+                        "stats: could not read summaries: {}",
+                        err.to_string()
+                    ))
+                });
                 print_stats(queries, sort);
             }
         },
+        ("combine", args) => {
+            let infos = combine(args.unwrap().values_of("file").unwrap().collect());
+            write_summaries(infos);
+        }
         _ => die("internal error: no other subcommands exist"),
     }
 }
