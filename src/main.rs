@@ -49,12 +49,17 @@ pub fn die(msg: &str) -> ! {
 
 /// The statistics we maintain about each query; we keep queries unique
 /// by `(query, subgraph)`
+///
+/// Changes to this data structure require that the summary files get
+/// regenerated from the processed log files by running `qlog process`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QueryInfo {
     query: String,
     subgraph: String,
     /// The total time (in ms) spend on this query
     total_time: u64,
+    /// The sum of query times squared, for computing standard deviation
+    time_squared: u64,
     /// The longest a single instance of the query took
     max_time: u64,
     /// The UUID of the slowest query; this helps in finding that query
@@ -77,6 +82,7 @@ impl QueryInfo {
             subgraph,
             id,
             total_time: 0,
+            time_squared: 0,
             max_time: 0,
             max_uuid: "(none)".to_owned(),
             max_variables: None,
@@ -88,6 +94,7 @@ impl QueryInfo {
     fn add(&mut self, time: u64, query_id: &str, variables: Option<String>) {
         self.calls += 1;
         self.total_time += time;
+        self.time_squared += time * time;
         if time > self.max_time {
             self.max_time = time;
             self.max_uuid = query_id.to_owned();
@@ -102,9 +109,21 @@ impl QueryInfo {
         self.total_time as f64 / self.calls as f64
     }
 
+    fn variance(&self) -> f64 {
+        let avg = self.avg();
+        let calls = self.calls as f64;
+        let time_squared = self.time_squared as f64;
+        time_squared / calls - avg * avg
+    }
+
+    fn stddev(&self) -> f64 {
+        self.variance().sqrt()
+    }
+
     fn combine(&mut self, other: &QueryInfo) {
         self.calls += other.calls;
         self.total_time += other.total_time;
+        self.time_squared += other.time_squared;
         if other.max_time > self.max_time {
             self.max_time = other.max_time;
             self.max_uuid = other.max_uuid.clone();
@@ -259,12 +278,12 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
     {
         writeln!(
             stdout,
-            "| {:^7} | {:^8} | {:^12} | {:^6} | {:^6} | {:^6} | {:^8} |",
-            "QID", "calls", "total", "avg", "max", "slow", "uuid"
+            "| {:^7} | {:^8} | {:^12} | {:^6} | {:^6} | {:^6} | {:^6} |",
+            "QID", "calls", "total", "avg", "stddev", "max", "slow"
         );
         writeln!(
             stdout,
-            "|---------+----------+--------------+--------+--------+--------+----------|"
+            "|---------+----------+--------------+--------+--------+--------+--------|"
         );
     }
     for query in &queries {
@@ -272,14 +291,14 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
         {
             writeln!(
                 stdout,
-                "| Q{:0>6} | {:>8} | {:>12} | {:>6.0} | {:>6} | {:>6} | {:<8} |",
+                "| Q{:0>6} | {:>8} | {:>12} | {:>6.0} | {:>6.0} | {:>6} | {:>6} |",
                 query.id,
                 query.calls,
                 query.total_time,
                 query.avg(),
+                query.stddev(),
                 query.max_time,
-                query.slow_count,
-                &query.max_uuid[..8]
+                query.slow_count
             );
         }
     }
@@ -394,6 +413,7 @@ fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Erro
                 let (amount, unit) = human_readable_time(info.total_time);
                 println!("# total_time:      {:>12.1} {}", amount, unit);
                 println!("# avg_time:        {:>12.0} ms", info.avg());
+                println!("# stddev_time:     {:>12.0} ms", info.stddev());
                 println!("# max_time:        {:>12} ms", info.max_time);
                 println!("# max_uuid:      {}", info.max_uuid);
                 if let Some(max_vars) = &info.max_variables {
