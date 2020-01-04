@@ -342,8 +342,8 @@ fn main() {
             SubCommand::with_name("stats")
                 .about("Show statistics")
                 .args_from_usage(
-                    "-i, --input=<FILE> 'Read summaries from FILE'
-                     -s, --sort=[SORT]  'Sort by this column'",
+                    "-s, --sort=[SORT]  'Sort by this column'
+                     <summary>",
                 ),
         )
         .subcommand(
@@ -377,7 +377,7 @@ fn main() {
             None => die("stats: missing arguments"),
             Some(args) => {
                 let input = args
-                    .value_of("input")
+                    .value_of("summary")
                     .unwrap_or_else(|| die("stats: missing input file"));
                 let sort = args.value_of("sort").unwrap_or("total_time");
                 let queries = read_summaries(input).unwrap_or_else(|err| {
