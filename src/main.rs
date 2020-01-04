@@ -21,10 +21,12 @@ use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+/// Queries that take longer than this (in ms) are considered slow
 const SLOW_THRESHOLD: u64 = 1000;
 const PRINT_TIMING: bool = false;
 
 lazy_static! {
+    /// The regexp we use to extract data about GraphQL queries from log files
     static ref QUERY_RE: Regex = Regex::new(
         " Execute query, query_time_ms: ([0-9]+), \
          query: (.*) , \
@@ -33,6 +35,9 @@ lazy_static! {
          component: "
     )
     .unwrap();
+
+    /// The regexp for finding arguments in GraphQL queries. This intentionally
+    /// doesn't cover all possible GraphQL values, only numbers and strings
     static ref VAR_RE: Regex =
         Regex::new("([_A-Za-z][_0-9A-Za-z]*): *([0-9]+|\"[^\"]*\")").unwrap();
 }
@@ -42,23 +47,26 @@ pub fn die(msg: &str) -> ! {
     std::process::exit(1);
 }
 
-pub fn die_with<T, E: std::fmt::Display>(res: Result<T, E>, msg: &str) -> T {
-    match res {
-        Err(e) => die(&format!("{}: {}", msg, e.to_string())),
-        Ok(t) => t,
-    }
-}
-
+/// The statistics we maintain about each query; we keep queries unique
+/// by `(query, subgraph)`
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct QueryInfo {
     query: String,
     subgraph: String,
+    /// The total time (in ms) spend on this query
     total_time: u64,
+    /// The longest a single instance of the query took
     max_time: u64,
+    /// The UUID of the slowest query; this helps in finding that query
+    /// in the logfile
     max_uuid: String,
+    /// The variables used in the slowest query
     max_variables: Option<String>,
+    /// The number of times this query took longer than `SLOW_THRESHOLD`
     slow_count: u64,
+    /// The number of times the query has been run
     calls: u64,
+    /// An ID to make it easier to refer to the query for the user
     id: usize,
 }
 
@@ -105,6 +113,8 @@ impl QueryInfo {
         self.slow_count += other.slow_count;
     }
 
+    /// A hash value that can be calculated without constructing
+    /// a `QueryInfo`
     fn hash(query: &str, subgraph: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
         (query, subgraph).hash(&mut hasher);
@@ -112,7 +122,9 @@ impl QueryInfo {
     }
 }
 
-fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
+/// The heart of the `process` subcommand. Expects a logfile containing
+/// query logs on the command line.
+fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
     let mut count: usize = 0;
@@ -121,6 +133,16 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
         caps.get(i).map(|field| field.as_str())
     }
 
+    /// Canonicalize queries so that queries that only differ in argument
+    /// values are considered equal and summarized together. We do this by
+    /// looking for arguments and turning something like
+    /// `things(where: { color: "blue" })` into
+    /// `things(where: { color: $color })`. This is mostly based on
+    /// heuristics since we don't want to fully parse GraphQL to keep
+    /// logfile processing reasonably fast.
+    ///
+    /// Returns the rewritten query and a string that contains the
+    /// variable values in JSON form (`{ color: "blue" }`)
     fn canonicalize(query: &str) -> (Cow<'_, str>, Option<String>) {
         if VAR_RE.is_match(query) {
             let mut vars = String::new();
@@ -159,7 +181,12 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
                 field(&caps, 4),
             ) {
                 let query_time: u64 = match query_time.parse() {
-                    Err(_) => continue,
+                    Err(_) => {
+                        if print_extra {
+                            eprintln!("not a query: {}", line)
+                        }
+                        continue;
+                    }
                     Ok(qt) => qt,
                 };
                 let (query, variables) = canonicalize(query);
@@ -185,19 +212,20 @@ fn parse_logfile(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
     Ok(queries.values().cloned().collect())
 }
 
+/// Read a list of summaries from `filename` The file must be in
+/// 'JSON lines' format, i.e., with one JSON object per line
 fn read_summaries(filename: &str) -> Result<Vec<QueryInfo>, std::io::Error> {
     let file = std::fs::File::open(filename)?;
     let reader = BufReader::new(file);
     let mut infos = vec![];
     for line in reader.lines() {
-        let line = line.unwrap();
-
-        let value = serde_json::from_str(&line)?;
-        infos.push(value);
+        infos.push(serde_json::from_str(&line?)?);
     }
     Ok(infos)
 }
 
+/// Write a list of summaries to stdout; the list will be written in
+/// 'JSON lines' format
 fn write_summaries(infos: Vec<QueryInfo>) {
     for info in infos {
         let json = serde_json::to_string(&info).unwrap_or_else(|err| {
@@ -210,6 +238,7 @@ fn write_summaries(infos: Vec<QueryInfo>) {
     }
 }
 
+/// The 'stats' subcommand
 fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
     let sort = sort.chars().next().unwrap_or('t');
     queries.sort_by(|a, b| {
@@ -256,7 +285,9 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
     }
 }
 
-fn prepare(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
+/// The 'extract' subcommand turning a StackDriver logfile into a plain
+/// textual logfile by pulling out the 'textPayload' for each entry
+fn extract(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
     let json_ext = OsStr::new("json");
     let mut stdout = io::stdout();
 
@@ -271,13 +302,11 @@ fn prepare(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
             }
             let file = File::open(entry.path())?;
             let reader = BufReader::new(file);
+
             // Going line by line is much faster than using
             // serde_json::Deserializer::from_reader(reader).into_iter();
             for line in reader.lines() {
-                let line = line?;
-
-                let value = serde_json::from_str(&line)?;
-                if let Value::Object(map) = value {
+                if let Value::Object(map) = serde_json::from_str(&line?)? {
                     if let Some(Value::String(text)) = map.get("textPayload") {
                         if let Err(e) = stdout.write(text.as_bytes()) {
                             if e.kind() == std::io::ErrorKind::BrokenPipe {
@@ -294,6 +323,8 @@ fn prepare(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
     Ok(())
 }
 
+/// The 'combine' subcommand. Reads summaries from 'filenames' and prints
+/// the summary resulting from combining all those summaries
 fn combine(filenames: Vec<&str>) -> Vec<QueryInfo> {
     let mut infos: BTreeMap<u64, QueryInfo> = BTreeMap::default();
     for filename in filenames {
@@ -315,6 +346,64 @@ fn combine(filenames: Vec<&str>) -> Vec<QueryInfo> {
         value.id = indx;
     }
     infos.values().cloned().collect()
+}
+
+/// The 'queries' subcommand
+fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Error> {
+    fn human_readable_time(time: u64) -> (f64, &'static str) {
+        const SECS_PER_MINUTE: u64 = 60;
+        const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
+        const SECS_PER_DAY: u64 = 24 * SECS_PER_HOUR;
+
+        let time = Duration::from_millis(time);
+        if time > Duration::from_secs(SECS_PER_DAY) {
+            (time.as_secs_f64() / SECS_PER_DAY as f64, "days")
+        } else if time > Duration::from_secs(2 * SECS_PER_HOUR) {
+            (time.as_secs_f64() / SECS_PER_HOUR as f64, "h")
+        } else if time > Duration::from_secs(5 * SECS_PER_MINUTE) {
+            (time.as_secs_f64() / SECS_PER_MINUTE as f64, "m")
+        } else if time > Duration::from_secs(10) {
+            (time.as_secs_f64(), "s")
+        } else {
+            (time.as_millis() as f64, "ms")
+        }
+    }
+
+    let infos = read_summaries(filename)?;
+    for (count, query) in queries.iter().enumerate() {
+        if query.starts_with("Q") {
+            let qid: usize = match query[1..].parse() {
+                Err(_) => {
+                    eprintln!("skipping invalid query identifier {}", query);
+                    continue;
+                }
+                Ok(qid) => qid,
+            };
+            if let Some(info) = infos.iter().find(|info| info.id == qid) {
+                if count > 0 {
+                    println!("");
+                }
+                println!("{:=<32} Q{} {:=<32}", "", info.id, "");
+                println!("# subgraph:      {}", info.subgraph);
+                println!("# calls:           {:>12}", info.calls);
+                println!("# slow_count:      {:>12}", info.slow_count);
+                println!(
+                    "# slow_percent:    {:>12.2} %",
+                    info.slow_count as f64 * 100.0 / info.calls as f64
+                );
+                let (amount, unit) = human_readable_time(info.total_time);
+                println!("# total_time:      {:>12.1} {}", amount, unit);
+                println!("# avg_time:        {:>12.0} ms", info.avg());
+                println!("# max_time:        {:>12} ms", info.max_time);
+                println!("# max_uuid:      {}", info.max_uuid);
+                if let Some(max_vars) = &info.max_variables {
+                    println!("# max_variables: {}", max_vars);
+                }
+                println!("\n{}", info.query);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn main() {
@@ -342,8 +431,16 @@ fn main() {
             SubCommand::with_name("stats")
                 .about("Show statistics")
                 .args_from_usage(
-                    "-s, --sort=[SORT]  'Sort by this column'
+                    "-s, --sort=[SORT]  'Sort by this column (default: total_time)'
                      <summary>",
+                ),
+        )
+        .subcommand(
+            SubCommand::with_name("query")
+                .about("Show details about a specific query")
+                .args_from_usage(
+                    "<summary>
+                     <query>...",
                 ),
         )
         .subcommand(
@@ -355,17 +452,14 @@ fn main() {
 
     match args.subcommand() {
         ("extract", Some(args)) => {
-            let dir = args.value_of("dir").unwrap();
+            let dir = args.value_of("dir").expect("'dir' is mandatory");
             let verbose = args.is_present("verbose");
-            prepare(dir, verbose)
-                .unwrap_or_else(|err| die(&format!("prepare: {}", err.to_string())));
+            extract(dir, verbose)
+                .unwrap_or_else(|err| die(&format!("extract: {}", err.to_string())));
         }
         ("process", args) => {
-            let extra = match args {
-                None => false,
-                Some(args) => args.is_present("extra"),
-            };
-            let infos = parse_logfile(extra).unwrap_or_else(|err| {
+            let extra = args.map(|args| args.is_present("extra")).unwrap_or(false);
+            let infos = process(extra).unwrap_or_else(|err| {
                 die(&format!(
                     "ingest: failed to parse logfile: {}",
                     err.to_string()
@@ -373,24 +467,45 @@ fn main() {
             });
             write_summaries(infos);
         }
-        ("stats", args) => match args {
-            None => die("stats: missing arguments"),
-            Some(args) => {
-                let input = args
-                    .value_of("summary")
-                    .unwrap_or_else(|| die("stats: missing input file"));
-                let sort = args.value_of("sort").unwrap_or("total_time");
-                let queries = read_summaries(input).unwrap_or_else(|err| {
-                    die(&format!(
-                        "stats: could not read summaries: {}",
-                        err.to_string()
-                    ))
-                });
-                print_stats(queries, sort);
-            }
-        },
+        ("stats", args) => {
+            let args = args.expect("arguments are mandatory for this command");
+
+            let summary = args
+                .value_of("summary")
+                .unwrap_or_else(|| die("stats: missing summary file"));
+            let sort = args.value_of("sort").unwrap_or("total_time");
+            let queries = read_summaries(summary).unwrap_or_else(|err| {
+                die(&format!(
+                    "stats: could not read summaries: {}",
+                    err.to_string()
+                ))
+            });
+            print_stats(queries, sort);
+        }
+        ("query", args) => {
+            let args = args.expect("arguments are mandatory for this command");
+            let summary = args
+                .value_of("summary")
+                .unwrap_or_else(|| die("stats: missing summary file"));
+            let queries = args
+                .values_of("query")
+                .expect("'query' is a mandatory argument")
+                .collect();
+            print_queries(summary, queries).unwrap_or_else(|err| {
+                die(&format!(
+                    "query: could not print queries: {}",
+                    err.to_string()
+                ))
+            });
+        }
         ("combine", args) => {
-            let infos = combine(args.unwrap().values_of("file").unwrap().collect());
+            let files = args
+                .expect("arguments are mandatory for this command")
+                .values_of("file")
+                .expect("'file' is a mandatory argument")
+                .collect();
+
+            let infos = combine(files);
             write_summaries(infos);
         }
         _ => die("internal error: no other subcommands exist"),
