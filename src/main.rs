@@ -163,7 +163,15 @@ fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
     ///
     /// Returns the rewritten query and a string that contains the
     /// variable values in JSON form (`{ color: "blue" }`)
-    fn canonicalize(query: &str) -> (Cow<'_, str>, Option<String>) {
+    fn canonicalize<'a>(query: &'a str, vars: Option<&str>) -> (Cow<'a, str>, Option<String>) {
+        // If the query had explicit variables, just use those, don't try
+        // to guess and extract them
+        if let Some(vars) = vars {
+            if vars.len() > 0 && vars != "{}" && vars != "null" {
+                return (Cow::from(query), Some(vars.to_owned()));
+            }
+        }
+
         if VAR_RE.is_match(query) {
             let mut vars = String::new();
             write!(&mut vars, "{{ ").unwrap();
@@ -209,7 +217,7 @@ fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
                     }
                     Ok(qt) => qt,
                 };
-                let (query, variables) = canonicalize(query);
+                let (query, variables) = canonicalize(query, field(&caps, "vars"));
                 let hsh = QueryInfo::hash(&query, &subgraph);
                 let info = queries.entry(hsh).or_insert_with(|| {
                     count += 1;
