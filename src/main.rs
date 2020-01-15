@@ -29,7 +29,7 @@ lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref QUERY_RE: Regex = Regex::new(
         " Execute query, query_time_ms: (?P<time>[0-9]+), \
-        (?:variables: (?P<vars>\\{[^}]*\\}|null), )?\
+        (?:variables: (?P<vars>\\{.*\\}|null), )?\
          query: (?P<query>.*) , \
          query_id: (?P<qid>[0-9a-f-]+), \
          subgraph_id: (?P<sid>[a-zA-Z0-9]*), \
@@ -576,6 +576,8 @@ mod tests {
              subgraph_id: QmSuBgRaPh, \
              component: GraphQlRunner";
 
+        const LINE5: &str = "Dec 31 22:59:58.863 INFO Execute query, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
+
         let caps = QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
         assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
@@ -612,5 +614,15 @@ mod tests {
         assert_eq!(Some("c8-1c-4c-98-65"), field(&caps, "qid"));
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(Some("{\"id\":\"0xdeadbeef\"}"), field(&caps, "vars"));
+
+        let caps = dbg!(QUERY_RE.captures(LINE5)).unwrap();
+        assert_eq!(Some("2657"), field(&caps, "time"));
+        // Skip the query, it's big
+        assert_eq!(Some("2d-12-4b-a8-6b"), field(&caps, "qid"));
+        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
+        assert_eq!(
+            Some("{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}"),
+            field(&caps, "vars")
+        );
     }
 }
