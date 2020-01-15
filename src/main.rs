@@ -28,10 +28,11 @@ const PRINT_TIMING: bool = false;
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref QUERY_RE: Regex = Regex::new(
-        " Execute query, query_time_ms: ([0-9]+), \
-         query: (.*) , \
-         query_id: ([0-9a-f-]+), \
-         subgraph_id: ([a-zA-Z0-9]*), \
+        " Execute query, query_time_ms: (?P<time>[0-9]+), \
+        (?:variables: (?P<vars>\\{[^}]*\\}|null), )?\
+         query: (?P<query>.*) , \
+         query_id: (?P<qid>[0-9a-f-]+), \
+         subgraph_id: (?P<sid>[a-zA-Z0-9]*), \
          component: "
     )
     .unwrap();
@@ -141,16 +142,16 @@ impl QueryInfo {
     }
 }
 
+fn field<'a>(caps: &'a Captures, group: &str) -> Option<&'a str> {
+    caps.name(group).map(|field| field.as_str())
+}
+
 /// The heart of the `process` subcommand. Expects a logfile containing
 /// query logs on the command line.
 fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
     let mut count: usize = 0;
-
-    fn field<'a>(caps: &'a Captures, i: usize) -> Option<&'a str> {
-        caps.get(i).map(|field| field.as_str())
-    }
 
     /// Canonicalize queries so that queries that only differ in argument
     /// values are considered equal and summarized together. We do this by
@@ -194,10 +195,10 @@ fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
             mtch += mtch_start.elapsed();
             lines += 1;
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
-                field(&caps, 1),
-                field(&caps, 2),
-                field(&caps, 3),
-                field(&caps, 4),
+                field(&caps, "time"),
+                field(&caps, "query"),
+                field(&caps, "qid"),
+                field(&caps, "sid"),
             ) {
                 let query_time: u64 = match query_time.parse() {
                     Err(_) => {
@@ -529,5 +530,79 @@ fn main() {
             write_summaries(infos);
         }
         _ => die("internal error: no other subcommands exist"),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_query_re() {
+        const LINE1: &str = "Dec 30 20:55:13.071 INFO Execute query, \
+                             query_time_ms: 160, \
+                             query: query Stuff { things } , \
+                             query_id: f-1-4-b-e4, \
+                             subgraph_id: QmSuBgRaPh, \
+                             component: GraphQlRunner\n";
+        const LINE2: &str = "Dec 31 23:59:59.667 INFO Execute query, \
+                             query_time_ms: 125, \
+                             variables: {}, \
+                             query: query { things(id:\"1\") { id }} , \
+                             query_id: f2-6b-48-b6-6b, \
+                             subgraph_id: QmSuBgRaPh, \
+                             component: GraphQlRunner";
+        const LINE3: &str = "Dec 31 23:59:59.739 INFO Execute query, \
+                             query_time_ms: 14, \
+                             variables: null, \
+                             query: query TranscoderQuery { transcoders(first: 1) { id } } , \
+                             query_id: c5-d3-4e-92-37, \
+                             subgraph_id: QmeYBGccAwahY, \
+                             component: GraphQlRunner";
+        const LINE4: &str =
+            "Dec 31 23:59:59.846 INFO Execute query, \
+             query_time_ms: 12, \
+             variables: {\"id\":\"0xdeadbeef\"}, \
+             query: query exchange($id: String!) { exchange(id: $id) { id tokenAddress } } , \
+             query_id: c8-1c-4c-98-65, \
+             subgraph_id: QmSuBgRaPh, \
+             component: GraphQlRunner";
+
+        let caps = QUERY_RE.captures(LINE1).unwrap();
+        assert_eq!(Some("160"), field(&caps, "time"));
+        assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
+        assert_eq!(Some("f-1-4-b-e4"), field(&caps, "qid"));
+        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
+        assert_eq!(None, field(&caps, "vars"));
+
+        let caps = QUERY_RE.captures(LINE2).unwrap();
+        assert_eq!(Some("125"), field(&caps, "time"));
+        assert_eq!(
+            Some("query { things(id:\"1\") { id }}"),
+            field(&caps, "query")
+        );
+        assert_eq!(Some("f2-6b-48-b6-6b"), field(&caps, "qid"));
+        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
+        assert_eq!(Some("{}"), field(&caps, "vars"));
+
+        let caps = QUERY_RE.captures(LINE3).unwrap();
+        assert_eq!(Some("14"), field(&caps, "time"));
+        assert_eq!(
+            Some("query TranscoderQuery { transcoders(first: 1) { id } }"),
+            field(&caps, "query")
+        );
+        assert_eq!(Some("c5-d3-4e-92-37"), field(&caps, "qid"));
+        assert_eq!(Some("QmeYBGccAwahY"), field(&caps, "sid"));
+        assert_eq!(Some("null"), field(&caps, "vars"));
+
+        let caps = QUERY_RE.captures(LINE4).unwrap();
+        assert_eq!(Some("12"), field(&caps, "time"));
+        assert_eq!(
+            Some("query exchange($id: String!) { exchange(id: $id) { id tokenAddress } }"),
+            field(&caps, "query")
+        );
+        assert_eq!(Some("c8-1c-4c-98-65"), field(&caps, "qid"));
+        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
+        assert_eq!(Some("{\"id\":\"0xdeadbeef\"}"), field(&caps, "vars"));
     }
 }
