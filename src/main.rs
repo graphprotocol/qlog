@@ -27,7 +27,7 @@ const PRINT_TIMING: bool = false;
 
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
-    static ref QUERY_RE: Regex = Regex::new(
+    static ref GQL_QUERY_RE: Regex = Regex::new(
         " Execute query, query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
          query: (?P<query>.*) , \
@@ -199,7 +199,7 @@ fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
         let line = line?;
 
         let mtch_start = Instant::now();
-        if let Some(caps) = QUERY_RE.captures(&line) {
+        if let Some(caps) = GQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
             lines += 1;
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
@@ -546,7 +546,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_query_re() {
+    fn test_gql_query_re() {
         const LINE1: &str = "Dec 30 20:55:13.071 INFO Execute query, \
                              query_time_ms: 160, \
                              query: query Stuff { things } , \
@@ -578,14 +578,14 @@ mod tests {
 
         const LINE5: &str = "Dec 31 22:59:58.863 INFO Execute query, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
 
-        let caps = QUERY_RE.captures(LINE1).unwrap();
+        let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
         assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
         assert_eq!(Some("f-1-4-b-e4"), field(&caps, "qid"));
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(None, field(&caps, "vars"));
 
-        let caps = QUERY_RE.captures(LINE2).unwrap();
+        let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
         assert_eq!(Some("125"), field(&caps, "time"));
         assert_eq!(
             Some("query { things(id:\"1\") { id }}"),
@@ -595,7 +595,7 @@ mod tests {
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(Some("{}"), field(&caps, "vars"));
 
-        let caps = QUERY_RE.captures(LINE3).unwrap();
+        let caps = GQL_QUERY_RE.captures(LINE3).unwrap();
         assert_eq!(Some("14"), field(&caps, "time"));
         assert_eq!(
             Some("query TranscoderQuery { transcoders(first: 1) { id } }"),
@@ -605,7 +605,7 @@ mod tests {
         assert_eq!(Some("QmeYBGccAwahY"), field(&caps, "sid"));
         assert_eq!(Some("null"), field(&caps, "vars"));
 
-        let caps = QUERY_RE.captures(LINE4).unwrap();
+        let caps = GQL_QUERY_RE.captures(LINE4).unwrap();
         assert_eq!(Some("12"), field(&caps, "time"));
         assert_eq!(
             Some("query exchange($id: String!) { exchange(id: $id) { id tokenAddress } }"),
@@ -615,7 +615,7 @@ mod tests {
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(Some("{\"id\":\"0xdeadbeef\"}"), field(&caps, "vars"));
 
-        let caps = dbg!(QUERY_RE.captures(LINE5)).unwrap();
+        let caps = dbg!(GQL_QUERY_RE.captures(LINE5)).unwrap();
         assert_eq!(Some("2657"), field(&caps, "time"));
         // Skip the query, it's big
         assert_eq!(Some("2d-12-4b-a8-6b"), field(&caps, "qid"));
