@@ -37,6 +37,17 @@ lazy_static! {
     )
     .unwrap();
 
+    /// The regexp we use to extract data about SQL queries from the log files
+    static ref SQL_QUERY_RE: Regex = Regex::new(
+        " Executed SQL query, time_ms: (?P<time>[0-9]+), \
+          query: (?P<query>.*) -- \
+          binds: (?P<binds>.*), \
+          query_id: (?P<qid>[0-9a-f-]+), \
+          subgraph_id: (?P<sid>[a-zA-Z0-9]*), \
+          component: "
+    )
+    .unwrap();
+
     /// The regexp for finding arguments in GraphQL queries. This intentionally
     /// doesn't cover all possible GraphQL values, only numbers and strings
     static ref VAR_RE: Regex =
@@ -623,6 +634,33 @@ mod tests {
         assert_eq!(
             Some("{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}"),
             field(&caps, "vars")
+        );
+    }
+
+    #[test]
+    fn test_sql_query_re() {
+        const LINE1:&str = "Jan 22 11:22:33.573 TRCE Executed SQL query, \
+        time_ms: 6, \
+        query: select 'Beneficiary' as entity, to_jsonb(c.*) as data   from \"sgd1\".\"beneficiary\" c  where c.\"block_range\" @> $1 order by \"id\"  limit 100 \
+        -- binds: [2147483647], \
+        query_id: 1d8bc664-41dd-4cf2-8ad6-997e459b322f, \
+        subgraph_id: QmZawMfSrDUr1rYAW9b5rSckGoRCw8tN77WXFbLNEKXPGz, \
+        component: GraphQlRunner";
+
+        let caps = SQL_QUERY_RE.captures(LINE1).unwrap();
+
+        assert_eq!(Some("6"), field(&caps, "time"));
+        let query = field(&caps, "query").unwrap();
+        assert!(query.starts_with("select 'Beneficiary' as entity"));
+        assert!(query.ends_with("limit 100"));
+        assert_eq!(Some("[2147483647]"), field(&caps, "binds"));
+        assert_eq!(
+            Some("1d8bc664-41dd-4cf2-8ad6-997e459b322f"),
+            field(&caps, "qid")
+        );
+        assert_eq!(
+            Some("QmZawMfSrDUr1rYAW9b5rSckGoRCw8tN77WXFbLNEKXPGz"),
+            field(&caps, "sid")
         );
     }
 }
