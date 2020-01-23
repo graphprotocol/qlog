@@ -6,7 +6,7 @@ extern crate serde;
 extern crate serde_json;
 extern crate walkdir;
 
-use clap::{App, AppSettings, SubCommand};
+use clap::{App, AppSettings, ArgMatches, SubCommand};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
-use std::io::{self, BufRead, BufReader, Write};
+use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::time::{Duration, Instant};
 
 use regex::{Captures, Regex};
@@ -24,6 +24,14 @@ use walkdir::WalkDir;
 /// Queries that take longer than this (in ms) are considered slow
 const SLOW_THRESHOLD: u64 = 1000;
 const PRINT_TIMING: bool = false;
+
+/// When a log line contains this text, we know it's about a GraphQL
+/// query
+const GQL_MARKER: &str = "Execute query";
+
+/// When a log line contains this text, we know it's about a SQL
+/// query
+const SQL_MARKER: &str = "Executed SQL query";
 
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
@@ -103,14 +111,14 @@ impl QueryInfo {
         }
     }
 
-    fn add(&mut self, time: u64, query_id: &str, variables: Option<String>) {
+    fn add(&mut self, time: u64, query_id: &str, variables: Option<Cow<'_, str>>) {
         self.calls += 1;
         self.total_time += time;
         self.time_squared += time * time;
         if time > self.max_time {
             self.max_time = time;
             self.max_uuid = query_id.to_owned();
-            self.max_variables = variables;
+            self.max_variables = variables.map(|vars| vars.into_owned());
         }
         if time > SLOW_THRESHOLD {
             self.slow_count += 1;
@@ -157,12 +165,33 @@ fn field<'a>(caps: &'a Captures, group: &str) -> Option<&'a str> {
     caps.name(group).map(|field| field.as_str())
 }
 
+fn add_entry(
+    queries: &mut BTreeMap<u64, QueryInfo>,
+    query_time: &str,
+    query_id: &str,
+    query: Cow<'_, str>,
+    variables: Option<Cow<'_, str>>,
+    subgraph: &str,
+) -> Result<(), ()> {
+    let query_time: u64 = match query_time.parse() {
+        Err(_) => return Err(()),
+        Ok(qt) => qt,
+    };
+    let hsh = QueryInfo::hash(&query, &subgraph);
+    let count = queries.len();
+    let info = queries
+        .entry(hsh)
+        .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1));
+    info.add(query_time, &query_id, variables);
+    Ok(())
+}
+
 /// The heart of the `process` subcommand. Expects a logfile containing
 /// query logs on the command line.
-fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
+fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
-    let mut queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
-    let mut count: usize = 0;
+    let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
+    let mut sql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
 
     /// Canonicalize queries so that queries that only differ in argument
     /// values are considered equal and summarized together. We do this by
@@ -219,22 +248,36 @@ fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
                 field(&caps, "qid"),
                 field(&caps, "sid"),
             ) {
-                let query_time: u64 = match query_time.parse() {
-                    Err(_) => {
-                        if print_extra {
-                            eprintln!("not a query: {}", line)
-                        }
-                        continue;
-                    }
-                    Ok(qt) => qt,
-                };
                 let (query, variables) = canonicalize(query, field(&caps, "vars"));
-                let hsh = QueryInfo::hash(&query, &subgraph);
-                let info = queries.entry(hsh).or_insert_with(|| {
-                    count += 1;
-                    QueryInfo::new(query.into_owned(), subgraph.to_owned(), count)
-                });
-                info.add(query_time, &query_id, variables);
+                add_entry(
+                    &mut gql_queries,
+                    query_time,
+                    query_id,
+                    query,
+                    variables.map(|vars| Cow::from(vars)),
+                    subgraph,
+                )
+                .unwrap_or_else(|_| eprintln!("not a query: {}", line));
+            }
+        } else if let Some(caps) = SQL_QUERY_RE.captures(&line) {
+            mtch += mtch_start.elapsed();
+            lines += 1;
+            if let (Some(time), Some(query), Some(binds), Some(qid), Some(sid)) = (
+                field(&caps, "time"),
+                field(&caps, "query"),
+                field(&caps, "binds"),
+                field(&caps, "qid"),
+                field(&caps, "sid"),
+            ) {
+                add_entry(
+                    &mut sql_queries,
+                    time,
+                    qid,
+                    Cow::from(query),
+                    Some(Cow::from(binds)),
+                    sid,
+                )
+                .unwrap_or_else(|_| eprintln!("not a query: {}", line));
             }
         } else if print_extra {
             eprintln!("not a query: {}", line);
@@ -248,7 +291,10 @@ fn process(print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
             lines
         );
     }
-    Ok(queries.values().cloned().collect())
+    Ok((
+        gql_queries.values().cloned().collect(),
+        sql_queries.values().cloned().collect(),
+    ))
 }
 
 /// Read a list of summaries from `filename` The file must be in
@@ -263,18 +309,26 @@ fn read_summaries(filename: &str) -> Result<Vec<QueryInfo>, std::io::Error> {
     Ok(infos)
 }
 
+fn buf_writer(filename: &str) -> BufWriter<File> {
+    match File::create(filename) {
+        Ok(file) => BufWriter::new(file),
+        Err(e) => die(&format!("failed to open `{}`: {}", filename, e)),
+    }
+}
+
 /// Write a list of summaries to stdout; the list will be written in
 /// 'JSON lines' format
-fn write_summaries(infos: Vec<QueryInfo>) {
+fn write_summaries(writer: &mut dyn Write, infos: Vec<QueryInfo>) -> Result<(), std::io::Error> {
     for info in infos {
         let json = serde_json::to_string(&info).unwrap_or_else(|err| {
             die(&format!(
-                "process: failed to convert to json: {}",
+                "failed to convert summary to json: {}",
                 err.to_string()
             ))
         });
-        println!("{}", json);
+        write!(writer, "{}\n", json)?;
     }
+    Ok(())
 }
 
 /// The 'stats' subcommand
@@ -326,7 +380,12 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
 
 /// The 'extract' subcommand turning a StackDriver logfile into a plain
 /// textual logfile by pulling out the 'textPayload' for each entry
-fn extract(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
+fn extract(
+    dir: &str,
+    gql: &mut dyn Write,
+    sql: &mut dyn Write,
+    verbose: bool,
+) -> Result<(), std::io::Error> {
     let json_ext = OsStr::new("json");
     let mut stdout = io::stdout();
 
@@ -347,7 +406,14 @@ fn extract(dir: &str, verbose: bool) -> Result<(), std::io::Error> {
             for line in reader.lines() {
                 if let Value::Object(map) = serde_json::from_str(&line?)? {
                     if let Some(Value::String(text)) = map.get("textPayload") {
-                        if let Err(e) = stdout.write(text.as_bytes()) {
+                        let res = if text.contains(SQL_MARKER) {
+                            sql.write(text.as_bytes())
+                        } else if text.contains(GQL_MARKER) {
+                            gql.write(text.as_bytes())
+                        } else {
+                            stdout.write(text.as_bytes())
+                        };
+                        if let Err(e) = res {
                             if e.kind() == std::io::ErrorKind::BrokenPipe {
                                 return Ok(());
                             } else {
@@ -454,9 +520,11 @@ fn main() {
         .setting(AppSettings::SubcommandRequiredElseHelp)
         .subcommand(
             SubCommand::with_name("extract")
-                .about("Read StackDriver log files and print the textPayLoad on stdout")
+                .about("Read StackDriver log files and print the textPayLoad to the SQL or GraphQL output file")
                 .args_from_usage(
                     "-v, --verbose  'Print which files are being read on stderr'
+                    graphql -g, --graphql=<FILE> Write GraphQL summary to this file
+                    sql -s, --sql=<FILE> Write SQL summary to this file
                     <dir> The directory containing StackDriver files",
                 ),
         )
@@ -464,7 +532,9 @@ fn main() {
             SubCommand::with_name("process")
                 .about("Process a logfile produced by 'extract' and output a summary")
                 .args_from_usage(
-                    "-e, --extra 'Print lines that are not recognized as queries on stderr'",
+                    "-e, --extra 'Print lines that are not recognized as queries on stderr'
+                     graphql -g, --graphql=<FILE> Write GraphQL summary to this file
+                     sql -s, --sql=<FILE> Write SQL summary to this file",
                 ),
         )
         .subcommand(
@@ -490,22 +560,43 @@ fn main() {
         )
         .get_matches();
 
+    fn writer_for(args: &ArgMatches<'_>, name: &str) -> BufWriter<File> {
+        args.value_of(name)
+            .map(buf_writer)
+            .expect(&format!("'{}' is mandatory", name))
+    }
+
     match args.subcommand() {
         ("extract", Some(args)) => {
             let dir = args.value_of("dir").expect("'dir' is mandatory");
             let verbose = args.is_present("verbose");
-            extract(dir, verbose)
+            let mut gql = writer_for(args, "graphql");
+            let mut sql = writer_for(args, "sql");
+            extract(dir, &mut gql, &mut sql, verbose)
                 .unwrap_or_else(|err| die(&format!("extract: {}", err.to_string())));
         }
-        ("process", args) => {
-            let extra = args.map(|args| args.is_present("extra")).unwrap_or(false);
-            let infos = process(extra).unwrap_or_else(|err| {
+        ("process", Some(args)) => {
+            let extra = args.is_present("extra");
+            let mut gql = writer_for(args, "graphql");
+            let mut sql = writer_for(args, "sql");
+            let (gql_infos, sql_infos) = process(extra).unwrap_or_else(|err| {
                 die(&format!(
-                    "ingest: failed to parse logfile: {}",
+                    "process: failed to parse logfile: {}",
                     err.to_string()
                 ))
             });
-            write_summaries(infos);
+            write_summaries(&mut gql, gql_infos).unwrap_or_else(|err| {
+                die(&format!(
+                    "process: failed to write GraphQL logfile: {}",
+                    err.to_string()
+                ))
+            });
+            write_summaries(&mut sql, sql_infos).unwrap_or_else(|err| {
+                die(&format!(
+                    "process: failed to write SQL logfile: {}",
+                    err.to_string()
+                ))
+            });
         }
         ("stats", args) => {
             let args = args.expect("arguments are mandatory for this command");
@@ -546,7 +637,12 @@ fn main() {
                 .collect();
 
             let infos = combine(files);
-            write_summaries(infos);
+            write_summaries(&mut io::stdout(), infos).unwrap_or_else(|err| {
+                die(&format!(
+                    "combine: failed to write summary file: {}",
+                    err.to_string()
+                ))
+            });
         }
         _ => die("internal error: no other subcommands exist"),
     }
