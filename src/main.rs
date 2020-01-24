@@ -27,16 +27,16 @@ const PRINT_TIMING: bool = false;
 
 /// When a log line contains this text, we know it's about a GraphQL
 /// query
-const GQL_MARKER: &str = "Execute query";
+const GQL_MARKER: &str = "Query timing (GraphQL)";
 
 /// When a log line contains this text, we know it's about a SQL
 /// query
-const SQL_MARKER: &str = "Executed SQL query";
+const SQL_MARKER: &str = "Query timing (SQL)";
 
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref GQL_QUERY_RE: Regex = Regex::new(
-        " Execute query, query_time_ms: (?P<time>[0-9]+), \
+        " Query timing \\(GraphQL\\), query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
          query: (?P<query>.*) , \
          query_id: (?P<qid>[0-9a-f-]+), \
@@ -47,7 +47,7 @@ lazy_static! {
 
     /// The regexp we use to extract data about SQL queries from the log files
     static ref SQL_QUERY_RE: Regex = Regex::new(
-        " Executed SQL query, time_ms: (?P<time>[0-9]+), \
+        " Query timing \\(SQL\\), time_ms: (?P<time>[0-9]+), \
           query: (?P<query>.*) -- \
           binds: (?P<binds>.*), \
           query_id: (?P<qid>[0-9a-f-]+), \
@@ -654,20 +654,20 @@ mod tests {
 
     #[test]
     fn test_gql_query_re() {
-        const LINE1: &str = "Dec 30 20:55:13.071 INFO Execute query, \
+        const LINE1: &str = "Dec 30 20:55:13.071 INFO Query timing (GraphQL), \
                              query_time_ms: 160, \
                              query: query Stuff { things } , \
                              query_id: f-1-4-b-e4, \
                              subgraph_id: QmSuBgRaPh, \
                              component: GraphQlRunner\n";
-        const LINE2: &str = "Dec 31 23:59:59.667 INFO Execute query, \
+        const LINE2: &str = "Dec 31 23:59:59.667 INFO Query timing (GraphQL), \
                              query_time_ms: 125, \
                              variables: {}, \
                              query: query { things(id:\"1\") { id }} , \
                              query_id: f2-6b-48-b6-6b, \
                              subgraph_id: QmSuBgRaPh, \
                              component: GraphQlRunner";
-        const LINE3: &str = "Dec 31 23:59:59.739 INFO Execute query, \
+        const LINE3: &str = "Dec 31 23:59:59.739 INFO Query timing (GraphQL), \
                              query_time_ms: 14, \
                              variables: null, \
                              query: query TranscoderQuery { transcoders(first: 1) { id } } , \
@@ -675,7 +675,7 @@ mod tests {
                              subgraph_id: QmeYBGccAwahY, \
                              component: GraphQlRunner";
         const LINE4: &str =
-            "Dec 31 23:59:59.846 INFO Execute query, \
+            "Dec 31 23:59:59.846 INFO Query timing (GraphQL), \
              query_time_ms: 12, \
              variables: {\"id\":\"0xdeadbeef\"}, \
              query: query exchange($id: String!) { exchange(id: $id) { id tokenAddress } } , \
@@ -683,7 +683,7 @@ mod tests {
              subgraph_id: QmSuBgRaPh, \
              component: GraphQlRunner";
 
-        const LINE5: &str = "Dec 31 22:59:58.863 INFO Execute query, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
+        const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
 
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
@@ -735,7 +735,7 @@ mod tests {
 
     #[test]
     fn test_sql_query_re() {
-        const LINE1:&str = "Jan 22 11:22:33.573 TRCE Executed SQL query, \
+        const LINE1:&str = "Jan 22 11:22:33.573 TRCE Query timing (SQL), \
         time_ms: 6, \
         query: select 'Beneficiary' as entity, to_jsonb(c.*) as data   from \"sgd1\".\"beneficiary\" c  where c.\"block_range\" @> $1 order by \"id\"  limit 100 \
         -- binds: [2147483647], \
