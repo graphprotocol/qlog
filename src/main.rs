@@ -33,6 +33,10 @@ const GQL_MARKER: &str = "Query timing (GraphQL)";
 /// query
 const SQL_MARKER: &str = "Query timing (SQL)";
 
+/// StackDriver prefixes lines with this when they were too long, and then
+/// shortens the line
+const TRIMMED: &str = "[Trimmed]";
+
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref GQL_QUERY_RE: Regex = Regex::new(
@@ -388,6 +392,8 @@ fn extract(
 ) -> Result<(), std::io::Error> {
     let json_ext = OsStr::new("json");
     let mut stdout = io::stdout();
+    let mut trimmed_count: usize = 0;
+    let mut count: usize = 0;
 
     for entry in WalkDir::new(dir) {
         let entry = entry?;
@@ -404,9 +410,13 @@ fn extract(
             // Going line by line is much faster than using
             // serde_json::Deserializer::from_reader(reader).into_iter();
             for line in reader.lines() {
+                count += 1;
                 if let Value::Object(map) = serde_json::from_str(&line?)? {
                     if let Some(Value::String(text)) = map.get("textPayload") {
-                        let res = if text.contains(SQL_MARKER) {
+                        let res = if text.contains(TRIMMED) {
+                            trimmed_count += 1;
+                            Ok(0)
+                        } else if text.contains(SQL_MARKER) {
                             sql.write(text.as_bytes())
                         } else if text.contains(GQL_MARKER) {
                             gql.write(text.as_bytes())
@@ -425,6 +435,10 @@ fn extract(
             }
         }
     }
+    eprintln!(
+        "Skipped {} trimmed lines out of {} lines",
+        trimmed_count, count
+    );
     Ok(())
 }
 
@@ -674,8 +688,7 @@ mod tests {
                              query_id: c5-d3-4e-92-37, \
                              subgraph_id: QmeYBGccAwahY, \
                              component: GraphQlRunner";
-        const LINE4: &str =
-            "Dec 31 23:59:59.846 INFO Query timing (GraphQL), \
+        const LINE4: &str = "Dec 31 23:59:59.846 INFO Query timing (GraphQL), \
              query_time_ms: 12, \
              variables: {\"id\":\"0xdeadbeef\"}, \
              query: query exchange($id: String!) { exchange(id: $id) { id tokenAddress } } , \
