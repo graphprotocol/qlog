@@ -23,7 +23,6 @@ use walkdir::WalkDir;
 
 /// Queries that take longer than this (in ms) are considered slow
 const SLOW_THRESHOLD: u64 = 1000;
-const PRINT_TIMING: bool = false;
 
 /// When a log line contains this text, we know it's about a GraphQL
 /// query
@@ -237,7 +236,8 @@ fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::i
     }
 
     let start = Instant::now();
-    let mut lines: usize = 0;
+    let mut gql_lines: usize = 0;
+    let mut sql_lines: usize = 0;
     let mut mtch = Duration::from_secs(0);
     for line in io::stdin().lock().lines() {
         let line = line?;
@@ -245,7 +245,7 @@ fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::i
         let mtch_start = Instant::now();
         if let Some(caps) = GQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
-            lines += 1;
+            gql_lines += 1;
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
                 field(&caps, "query"),
@@ -265,7 +265,7 @@ fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::i
             }
         } else if let Some(caps) = SQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
-            lines += 1;
+            sql_lines += 1;
             if let (Some(time), Some(query), Some(binds), Some(qid), Some(sid)) = (
                 field(&caps, "time"),
                 field(&caps, "query"),
@@ -287,14 +287,13 @@ fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::i
             eprintln!("not a query: {}", line);
         }
     }
-    if PRINT_TIMING {
-        eprintln!(
-            "parse: {:.3}s\nmatch: {:.3}s\ncount: {}",
-            start.elapsed().as_secs_f64(),
-            mtch.as_secs_f64(),
-            lines
-        );
-    }
+    eprintln!(
+        "Processed {} GraphQL and {} SQL queries in {:.3}s (regexp match: {:.3}s)",
+        gql_lines,
+        sql_lines,
+        start.elapsed().as_secs_f64(),
+        mtch.as_secs_f64(),
+    );
     Ok((
         gql_queries.values().cloned().collect(),
         sql_queries.values().cloned().collect(),
