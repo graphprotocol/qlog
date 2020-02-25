@@ -48,9 +48,15 @@ lazy_static! {
     )
     .unwrap();
 
-    /// The regexp we use to extract data about SQL queries from the log files
+    /// The regexp we use to extract data about SQL queries from the log files.
+    /// This will only match lines that were emitted during GraphQL execution
+    /// since it looks for `query_id` and `subgraph_id`; it will intentionally
+    /// not match the lines emitted by things like `store.get` which don't
+    /// have those two fields
     static ref SQL_QUERY_RE: Regex = Regex::new(
-        " Query timing \\(SQL\\), time_ms: (?P<time>[0-9]+), \
+        " Query timing \\(SQL\\), \
+          entity_count: [0-9]+, \
+          time_ms: (?P<time>[0-9]+), \
           query: (?P<query>.*) -- \
           binds: (?P<binds>.*), \
           query_id: (?P<qid>[0-9a-f-]+), \
@@ -748,6 +754,7 @@ mod tests {
     #[test]
     fn test_sql_query_re() {
         const LINE1:&str = "Jan 22 11:22:33.573 TRCE Query timing (SQL), \
+        entity_count: 7, \
         time_ms: 6, \
         query: select 'Beneficiary' as entity, to_jsonb(c.*) as data   from \"sgd1\".\"beneficiary\" c  where c.\"block_range\" @> $1 order by \"id\"  limit 100 \
         -- binds: [2147483647], \
