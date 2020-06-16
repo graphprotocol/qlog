@@ -7,18 +7,18 @@ extern crate serde_json;
 extern crate walkdir;
 
 use clap::{App, AppSettings, ArgMatches, SubCommand};
+use rand::{prelude::Rng, rngs::SmallRng, SeedableRng};
+use regex::{Captures, Regex};
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::time::{Duration, Instant};
-
-use regex::{Captures, Regex};
-use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 /// Queries that take longer than this (in ms) are considered slow
@@ -35,6 +35,11 @@ const SQL_MARKER: &str = "Query timing (SQL)";
 /// StackDriver prefixes lines with this when they were too long, and then
 /// shortens the line
 const TRIMMED: &str = "[Trimmed]";
+
+/// The index-node status API and the API for the subgraph of subgraphs logs
+/// requests under these subgraph names. We ignore them when we sample queries
+const INDEX_NODE_SUBGRAPH: &str = "indexnode";
+const SUBGRAPHS_SUBGRAPH: &str = "subgraphs";
 
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
@@ -74,6 +79,94 @@ lazy_static! {
 pub fn die(msg: &str) -> ! {
     println!("{}", msg);
     std::process::exit(1);
+}
+
+struct Sample {
+    query: String,
+    variables: Option<String>,
+}
+
+impl Sample {
+    fn new(query: &str, variables: &Option<&str>) -> Self {
+        let vars = variables.and_then(|vars| {
+            if vars.is_empty() || vars == "{}" || vars == "null" {
+                None
+            } else {
+                Some(vars.to_owned())
+            }
+        });
+        Sample {
+            query: query.to_owned(),
+            variables: vars,
+        }
+    }
+}
+
+struct Sampler {
+    size: usize,
+    rng: SmallRng,
+    samples: BTreeMap<String, Vec<Sample>>,
+    subgraphs: HashSet<String>,
+}
+
+impl Sampler {
+    fn new(size: usize, subgraphs: HashSet<String>) -> Self {
+        Sampler {
+            size,
+            rng: SmallRng::from_entropy(),
+            samples: BTreeMap::new(),
+            subgraphs,
+        }
+    }
+
+    fn sample<'b>(&mut self, query: &str, variables: &Option<&str>, subgraph: &'b str) {
+        if self.size == 0
+            || subgraph == INDEX_NODE_SUBGRAPH
+            || subgraph == SUBGRAPHS_SUBGRAPH
+            || (!self.subgraphs.is_empty() && !self.subgraphs.contains(subgraph))
+        {
+            return;
+        }
+
+        let samples = {
+            match self.samples.get_mut(subgraph) {
+                Some(samples) => samples,
+                None => self.samples.entry(subgraph.to_owned()).or_default(),
+            }
+        };
+        let sample = Sample::new(query, variables);
+        if samples.len() < self.size {
+            samples.push(sample);
+        } else {
+            let k = self.rng.gen_range(0, self.size);
+            if let Some(entry) = samples.get_mut(k) {
+                *entry = sample;
+            } else {
+                samples.push(sample);
+            }
+        }
+    }
+
+    fn write(&self, mut out: BufWriter<File>) -> Result<(), std::io::Error> {
+        #[derive(Serialize)]
+        struct SampleOutput<'a> {
+            subgraph: &'a String,
+            query: &'a String,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            variables: &'a Option<String>,
+        }
+        for (subgraph, samples) in &self.samples {
+            for sample in samples {
+                let v = SampleOutput {
+                    subgraph,
+                    query: &sample.query,
+                    variables: &sample.variables,
+                };
+                writeln!(out, "{}", serde_json::to_string(&v)?)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The statistics we maintain about each query; we keep queries unique
@@ -197,7 +290,10 @@ fn add_entry(
 
 /// The heart of the `process` subcommand. Expects a logfile containing
 /// query logs on the command line.
-fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::io::Error> {
+fn process(
+    sampler: &mut Sampler,
+    print_extra: bool,
+) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
     let mut sql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
@@ -258,13 +354,16 @@ fn process(print_extra: bool) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::i
                 field(&caps, "qid"),
                 field(&caps, "sid"),
             ) {
-                let (query, variables) = canonicalize(query, field(&caps, "vars"));
+                let variables = field(&caps, "vars");
+                sampler.sample(&query, &variables, &subgraph);
+                let (query, variables) = canonicalize(query, variables);
+                let variables = variables.map(|vars| Cow::from(vars));
                 add_entry(
                     &mut gql_queries,
                     query_time,
                     query_id,
                     query,
-                    variables.map(|vars| Cow::from(vars)),
+                    variables,
                     subgraph,
                 )
                 .unwrap_or_else(|_| eprintln!("not a query: {}", line));
@@ -542,9 +641,9 @@ fn main() {
                 .about("Read StackDriver log files and print the textPayLoad to the SQL or GraphQL output file")
                 .args_from_usage(
                     "-v, --verbose  'Print which files are being read on stderr'
-                    graphql -g, --graphql=<FILE> Write GraphQL summary to this file
-                    sql -s, --sql=<FILE> Write SQL summary to this file
-                    <dir> The directory containing StackDriver files",
+                    graphql -g, --graphql=<FILE> 'Write GraphQL summary to this file'
+                    sql -s, --sql=<FILE> 'Write SQL summary to this file'
+                    <dir> 'The directory containing StackDriver files'",
                 ),
         )
         .subcommand(
@@ -553,7 +652,10 @@ fn main() {
                 .args_from_usage(
                     "-e, --extra 'Print lines that are not recognized as queries on stderr'
                      graphql -g, --graphql=<FILE> Write GraphQL summary to this file
-                     sql -s, --sql=<FILE> Write SQL summary to this file",
+                     sql -s, --sql=<FILE> Write SQL summary to this file
+                     [samples] --samples=<NUMBER> 'Number of samples to take'
+                     [sample-file] --sample-file=<FILE> 'Where to write samples'
+                     [sample-subgraphs] --sample-subgraphs=<LIST> 'Which subgraphs to sample'",
                 ),
         )
         .subcommand(
@@ -598,7 +700,38 @@ fn main() {
             let extra = args.is_present("extra");
             let mut gql = writer_for(args, "graphql");
             let mut sql = writer_for(args, "sql");
-            let (gql_infos, sql_infos) = process(extra).unwrap_or_else(|err| {
+
+            let samples = args
+                .value_of("samples")
+                .map(|s| s.parse::<usize>().expect("'samples' is a number"))
+                .unwrap_or(0);
+            let samples_file = args
+                .value_of("sample-file")
+                .unwrap_or("/var/tmp/samples.jsonl");
+            let samples_subgraphs = args
+                .value_of("sample-subgraphs")
+                .map(|s| {
+                    s.split(",")
+                        .map(|t| t.to_owned())
+                        .collect::<HashSet<String>>()
+                })
+                .unwrap_or(HashSet::new());
+            if samples > 0 {
+                println!(
+                    "Taking {} samples and writing them to {}",
+                    samples, samples_file
+                );
+                if samples_subgraphs.is_empty() {
+                    println!("  sampling all subgraphs");
+                } else {
+                    println!("  sampling these subgraphs");
+                    for subgraph in &samples_subgraphs {
+                        println!("    {}", subgraph);
+                    }
+                }
+            }
+            let mut sampler = Sampler::new(samples, samples_subgraphs);
+            let (gql_infos, sql_infos) = process(&mut sampler, extra).unwrap_or_else(|err| {
                 die(&format!(
                     "process: failed to parse logfile: {}",
                     err.to_string()
@@ -616,6 +749,17 @@ fn main() {
                     err.to_string()
                 ))
             });
+            if samples > 0 {
+                sampler
+                    .write(buf_writer(samples_file))
+                    .unwrap_or_else(|err| {
+                        die(&format!(
+                            "process: failed to write samples to {}: {}",
+                            samples_file,
+                            err.to_string()
+                        ))
+                    });
+            }
         }
         ("stats", args) => {
             let args = args.expect("arguments are mandatory for this command");
