@@ -695,8 +695,8 @@ fn main() {
                 .about("Process a logfile produced by 'extract' and output a summary")
                 .args_from_usage(
                     "-e, --extra 'Print lines that are not recognized as queries on stderr'
-                     graphql -g, --graphql=<FILE> Write GraphQL summary to this file
-                     sql -s, --sql=<FILE> Write SQL summary to this file
+                     [graphql] -g, --graphql=<FILE> Write GraphQL summary to this file
+                     [sql] -s, --sql=<FILE> Write SQL summary to this file
                      [samples] --samples=<NUMBER> 'Number of samples to take'
                      [sample-file] --sample-file=<FILE> 'Where to write samples'
                      [sample-subgraphs] --sample-subgraphs=<LIST> 'Which subgraphs to sample'",
@@ -726,9 +726,7 @@ fn main() {
         .get_matches();
 
     fn writer_for(args: &ArgMatches<'_>, name: &str) -> BufWriter<File> {
-        args.value_of(name)
-            .map(buf_writer)
-            .expect(&format!("'{}' is mandatory", name))
+        buf_writer(args.value_of(name).unwrap_or("/dev/null"))
     }
 
     match args.subcommand() {
