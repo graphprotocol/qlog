@@ -73,7 +73,7 @@ lazy_static! {
     /// The regexp for finding arguments in GraphQL queries. This intentionally
     /// doesn't cover all possible GraphQL values, only numbers and strings
     static ref VAR_RE: Regex =
-        Regex::new("([_A-Za-z][_0-9A-Za-z]*): *([0-9]+|\"[^\"]*\")").unwrap();
+        Regex::new("([_A-Za-z][_0-9A-Za-z]*): *([0-9]+|\"([^\"]|\\\\\")*\"|\\[[^]]*\\])").unwrap();
 }
 
 pub fn die(msg: &str) -> ! {
