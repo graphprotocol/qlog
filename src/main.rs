@@ -44,7 +44,9 @@ const SUBGRAPHS_SUBGRAPH: &str = "subgraphs";
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref GQL_QUERY_RE: Regex = Regex::new(
-        " Query timing \\(GraphQL\\), query_time_ms: (?P<time>[0-9]+), \
+        " Query timing \\(GraphQL\\), \
+          (cached: (?P<cached>true|false), )?\
+         query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
          query: (?P<query>.*) , \
          query_id: (?P<qid>[0-9a-f-]+), \
@@ -239,6 +241,19 @@ struct QueryInfo {
     calls: u64,
     /// An ID to make it easier to refer to the query for the user
     id: usize,
+    /// The number of query executions that were served from cache
+    #[serde(default = "zero")]
+    cached_count: u64,
+    /// The total time we spent serving cached queries
+    #[serde(default = "zero")]
+    cached_time: u64,
+    /// The maximum time we spent serving a cached query
+    #[serde(default = "zero")]
+    cached_max_time: u64,
+}
+
+fn zero() -> u64 {
+    0
 }
 
 impl QueryInfo {
@@ -254,20 +269,31 @@ impl QueryInfo {
             max_variables: None,
             slow_count: 0,
             calls: 0,
+            cached_count: 0,
+            cached_time: 0,
+            cached_max_time: 0,
         }
     }
 
-    fn add(&mut self, time: u64, query_id: &str, variables: Option<Cow<'_, str>>) {
-        self.calls += 1;
-        self.total_time += time;
-        self.time_squared += time * time;
-        if time > self.max_time {
-            self.max_time = time;
-            self.max_uuid = query_id.to_owned();
-            self.max_variables = variables.map(|vars| vars.into_owned());
-        }
-        if time > SLOW_THRESHOLD {
-            self.slow_count += 1;
+    fn add(&mut self, time: u64, query_id: &str, variables: Option<Cow<'_, str>>, cached: bool) {
+        if cached {
+            self.cached_count += 1;
+            self.cached_time += time;
+            if time > self.cached_max_time {
+                self.cached_max_time = time;
+            }
+        } else {
+            self.calls += 1;
+            self.total_time += time;
+            self.time_squared += time * time;
+            if time > self.max_time {
+                self.max_time = time;
+                self.max_uuid = query_id.to_owned();
+                self.max_variables = variables.map(|vars| vars.into_owned());
+            }
+            if time > SLOW_THRESHOLD {
+                self.slow_count += 1;
+            }
         }
     }
 
@@ -286,6 +312,10 @@ impl QueryInfo {
         self.variance().sqrt()
     }
 
+    fn cached_avg(&self) -> f64 {
+        self.cached_time as f64 / self.cached_count as f64
+    }
+
     fn combine(&mut self, other: &QueryInfo) {
         self.calls += other.calls;
         self.total_time += other.total_time;
@@ -296,6 +326,12 @@ impl QueryInfo {
             self.max_variables = other.max_variables.clone();
         }
         self.slow_count += other.slow_count;
+
+        self.cached_count += other.cached_count;
+        self.cached_time += other.cached_time;
+        if other.cached_max_time > self.cached_max_time {
+            self.cached_max_time = other.cached_max_time;
+        }
     }
 
     /// A hash value that can be calculated without constructing
@@ -317,6 +353,7 @@ fn add_entry(
     query_id: &str,
     query: Cow<'_, str>,
     variables: Option<Cow<'_, str>>,
+    cached: bool,
     subgraph: &str,
 ) -> Result<(), ()> {
     let query_time: u64 = match query_time.parse() {
@@ -328,7 +365,7 @@ fn add_entry(
     let info = queries
         .entry(hsh)
         .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1));
-    info.add(query_time, &query_id, variables);
+    info.add(query_time, &query_id, variables, cached);
     Ok(())
 }
 
@@ -392,6 +429,7 @@ fn process(
         if let Some(caps) = GQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
+            let cached = field(&caps, "cached").map(|v| v == "true").unwrap_or(false);
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
                 field(&caps, "query"),
@@ -408,6 +446,7 @@ fn process(
                     query_id,
                     query,
                     variables,
+                    cached,
                     subgraph,
                 )
                 .unwrap_or_else(|_| eprintln!("not a query: {}", line));
@@ -428,6 +467,7 @@ fn process(
                     qid,
                     Cow::from(query),
                     Some(Cow::from(binds)),
+                    false,
                     sid,
                 )
                 .unwrap_or_else(|_| eprintln!("not a query: {}", line));
@@ -654,6 +694,13 @@ fn print_full_query(info: &QueryInfo) {
         writeln!(stdout, "# total_time:      {:>12.1} {}", amount, unit);
         writeln!(stdout, "# avg_time:        {:>12.0} ms", info.avg());
         writeln!(stdout, "# stddev_time:     {:>12.0} ms", info.stddev());
+        if info.cached_count > 0 {
+            writeln!(stdout, "# cached calls:    {:>12}", info.cached_count);
+            let (amount, unit) = human_readable_time(info.cached_time);
+            writeln!(stdout, "# cached time:     {:>12.1} {}", amount, unit);
+            writeln!(stdout, "# cached avg_time: {:>12.0} ms", info.cached_avg());
+            writeln!(stdout, "# cached max_time: {:>12} ms", info.cached_max_time);
+        }
         writeln!(stdout, "# max_time:        {:>12} ms", info.max_time);
         writeln!(stdout, "# max_uuid:      {}", info.max_uuid);
         if let Some(max_vars) = &info.max_variables {
@@ -717,6 +764,7 @@ fn main() {
         .subcommand(
             SubCommand::with_name("stats")
                 .about("Show statistics")
+                .after_help("For an explanation of the full output format, see the help for 'stats'")
                 .args_from_usage(
                     "-s, --sort=[SORT]  'Sort by this column (default: total_time)'
                      -f, --full         'Print full query details'
@@ -726,6 +774,7 @@ fn main() {
         .subcommand(
             SubCommand::with_name("query")
                 .about("Show details about a specific query")
+                .after_help(QUERY_HELP_TEXT)
                 .args_from_usage(
                     "<summary>
                      <query>...",
@@ -874,6 +923,36 @@ fn main() {
     }
 }
 
+// Help text for the 'query' subcommand
+const QUERY_HELP_TEXT: &str =
+    "For each query, print summary statistics of the query. The output has the\
+\nfollowing format:
+
+================================ QNNNN ================================
+# subgraph:        subgraph id
+# calls:           number of times the query was run against
+#                  the database
+# slow_count:      number of times a query took longer than 1s
+# slow_percent:    slow_count / calls * 100
+# total_time:      total time the queries took
+# avg_time:        total_time / calls
+# stddev_time:     standard deviation of the time queries took
+# cached calls:    number of query executions that were served
+#                  from cache. Cached executions do not enter
+#                  into the statistics for non-cached executions
+# cached time:     total time spent serving queries from cache
+# cached avg_time: cached time / cached calls
+# cached max_time: maximum time it took to serve a query from cache
+# max_time:        maximum time it took to serve a query from
+#                  the database
+# max_uuid:        query_id of a query that took max_time
+# max_variables:   variables that were passed to the invocation
+#                  that took max_time
+
+graphql query processed so that most values in filters etc. are
+extracted into variables
+";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -916,6 +995,7 @@ mod tests {
         assert_eq!(Some("f-1-4-b-e4"), field(&caps, "qid"));
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(None, field(&caps, "vars"));
+        assert_eq!(None, field(&caps, "cached"));
 
         let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
         assert_eq!(Some("125"), field(&caps, "time"));
@@ -947,7 +1027,7 @@ mod tests {
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(Some("{\"id\":\"0xdeadbeef\"}"), field(&caps, "vars"));
 
-        let caps = dbg!(GQL_QUERY_RE.captures(LINE5)).unwrap();
+        let caps = GQL_QUERY_RE.captures(LINE5).unwrap();
         assert_eq!(Some("2657"), field(&caps, "time"));
         // Skip the query, it's big
         assert_eq!(Some("2d-12-4b-a8-6b"), field(&caps, "qid"));
@@ -956,6 +1036,20 @@ mod tests {
             Some("{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}"),
             field(&caps, "vars")
         );
+    }
+
+    #[test]
+    fn test_gql_query_re_with_cache() {
+        const LINE1: &str = "INFO Query timing (GraphQL), cached: true, \
+          query_time_ms: 23, variables: null, \
+          query: { things { id timestamp } } , \
+          query_id: ed3d5fd7-9c86-4a68-8957-657d84c24aec, \
+          subgraph_id: Qmsubgraph, \
+          component: GraphQlRunner";
+
+        let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
+        assert_eq!(Some("true"), field(&caps, "cached"));
+        assert_eq!(Some("Qmsubgraph"), field(&caps, "sid"));
     }
 
     #[test]
