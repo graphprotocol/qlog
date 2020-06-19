@@ -483,8 +483,7 @@ fn write_summaries(writer: &mut dyn Write, infos: Vec<QueryInfo>) -> Result<(), 
     Ok(())
 }
 
-/// The 'stats' subcommand
-fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
+fn sort_queries(queries: &mut Vec<QueryInfo>, sort: &str) {
     let sort = sort.chars().next().unwrap_or('t');
     queries.sort_by(|a, b| {
         let ord = match sort {
@@ -497,6 +496,10 @@ fn print_stats(mut queries: Vec<QueryInfo>, sort: &str) {
         };
         ord.reverse()
     });
+}
+
+/// The 'stats' subcommand
+fn print_stats(queries: Vec<QueryInfo>) {
     // Use writeln! instead of println! so we do not get a panic on
     // SIGPIPE if the output is piped into e.g. head -n 1
     let mut stdout = io::stdout();
@@ -615,8 +618,7 @@ fn combine(filenames: Vec<&str>) -> Vec<QueryInfo> {
     infos.values().cloned().collect()
 }
 
-/// The 'queries' subcommand
-fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Error> {
+fn print_full_query(info: &QueryInfo) {
     fn human_readable_time(time: u64) -> (f64, &'static str) {
         const SECS_PER_MINUTE: u64 = 60;
         const SECS_PER_HOUR: u64 = 60 * SECS_PER_MINUTE;
@@ -636,6 +638,33 @@ fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Erro
         }
     }
 
+    let mut stdout = io::stdout();
+    #[allow(unused_must_use)]
+    {
+        writeln!(stdout, "{:=<32} Q{} {:=<32}", "", info.id, "");
+        writeln!(stdout, "# subgraph:      {}", info.subgraph);
+        writeln!(stdout, "# calls:           {:>12}", info.calls);
+        writeln!(stdout, "# slow_count:      {:>12}", info.slow_count);
+        writeln!(
+            stdout,
+            "# slow_percent:    {:>12.2} %",
+            info.slow_count as f64 * 100.0 / info.calls as f64
+        );
+        let (amount, unit) = human_readable_time(info.total_time);
+        writeln!(stdout, "# total_time:      {:>12.1} {}", amount, unit);
+        writeln!(stdout, "# avg_time:        {:>12.0} ms", info.avg());
+        writeln!(stdout, "# stddev_time:     {:>12.0} ms", info.stddev());
+        writeln!(stdout, "# max_time:        {:>12} ms", info.max_time);
+        writeln!(stdout, "# max_uuid:      {}", info.max_uuid);
+        if let Some(max_vars) = &info.max_variables {
+            writeln!(stdout, "# max_variables: {}", max_vars);
+        }
+        writeln!(stdout, "\n{}", info.query);
+    }
+}
+
+/// The 'queries' subcommand
+fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Error> {
     let infos = read_summaries(filename)?;
     for (count, query) in queries.iter().enumerate() {
         if query.starts_with("Q") {
@@ -650,24 +679,7 @@ fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Erro
                 if count > 0 {
                     println!("");
                 }
-                println!("{:=<32} Q{} {:=<32}", "", info.id, "");
-                println!("# subgraph:      {}", info.subgraph);
-                println!("# calls:           {:>12}", info.calls);
-                println!("# slow_count:      {:>12}", info.slow_count);
-                println!(
-                    "# slow_percent:    {:>12.2} %",
-                    info.slow_count as f64 * 100.0 / info.calls as f64
-                );
-                let (amount, unit) = human_readable_time(info.total_time);
-                println!("# total_time:      {:>12.1} {}", amount, unit);
-                println!("# avg_time:        {:>12.0} ms", info.avg());
-                println!("# stddev_time:     {:>12.0} ms", info.stddev());
-                println!("# max_time:        {:>12} ms", info.max_time);
-                println!("# max_uuid:      {}", info.max_uuid);
-                if let Some(max_vars) = &info.max_variables {
-                    println!("# max_variables: {}", max_vars);
-                }
-                println!("\n{}", info.query);
+                print_full_query(info);
             }
         }
     }
@@ -707,6 +719,7 @@ fn main() {
                 .about("Show statistics")
                 .args_from_usage(
                     "-s, --sort=[SORT]  'Sort by this column (default: total_time)'
+                     -f, --full         'Print full query details'
                      <summary>",
                 ),
         )
@@ -810,13 +823,21 @@ fn main() {
                 .value_of("summary")
                 .unwrap_or_else(|| die("stats: missing summary file"));
             let sort = args.value_of("sort").unwrap_or("total_time");
-            let queries = read_summaries(summary).unwrap_or_else(|err| {
+            let full = args.is_present("full");
+            let mut queries = read_summaries(summary).unwrap_or_else(|err| {
                 die(&format!(
                     "stats: could not read summaries: {}",
                     err.to_string()
                 ))
             });
-            print_stats(queries, sort);
+            sort_queries(&mut queries, sort);
+            if full {
+                for query in queries {
+                    print_full_query(&query);
+                }
+            } else {
+                print_stats(queries);
+            }
         }
         ("query", args) => {
             let args = args.expect("arguments are mandatory for this command");
