@@ -76,6 +76,9 @@ lazy_static! {
     /// doesn't cover all possible GraphQL values, only numbers and strings
     static ref VAR_RE: Regex =
         Regex::new("([_A-Za-z][_0-9A-Za-z]*): *([0-9]+|\"([^\"]|\\\\\")*\"|\\[[^]]*\\])").unwrap();
+
+    static ref QUERY_NAME_RE: Regex =
+    Regex::new("query GraphQL__Client__OperationDefinition(?P<delete>_[0-9]+)").unwrap();
 }
 
 pub fn die(msg: &str) -> ! {
@@ -369,6 +372,52 @@ fn add_entry(
     Ok(())
 }
 
+/// Canonicalize queries so that queries that only differ in argument
+/// values are considered equal and summarized together. We do this by
+/// looking for arguments and turning something like
+/// `things(where: { color: "blue" })` into
+/// `things(where: { color: $color })`. This is mostly based on
+/// heuristics since we don't want to fully parse GraphQL to keep
+/// logfile processing reasonably fast.
+///
+/// Returns the rewritten query and a string that contains the
+/// variable values in JSON form (`{ color: "blue" }`)
+fn canonicalize<'a>(query: &'a str, vars: Option<&str>) -> (Cow<'a, str>, Option<String>) {
+    // If the query had explicit variables, just use those, don't try
+    // to guess and extract them
+    if let Some(vars) = vars {
+        if vars.len() > 0 && vars != "{}" && vars != "null" {
+            return (Cow::from(query), Some(vars.to_owned()));
+        }
+    }
+
+    let (mut query, vars) = if VAR_RE.is_match(query) {
+        let mut vars = String::new();
+        write!(&mut vars, "{{ ").unwrap();
+        let mut count = 0;
+        let query = VAR_RE.replace_all(query, |caps: &Captures| {
+            if count > 0 {
+                write!(&mut vars, ", ").unwrap();
+            }
+
+            count += 1;
+            write!(vars, "{}{}: {}", &caps[1], count, &caps[2]).unwrap();
+            format!("{}: ${}{}", &caps[1], &caps[1], count)
+        });
+        write!(vars, " }}").unwrap();
+        (query, Some(vars))
+    } else {
+        (Cow::from(query), None)
+    };
+
+    if let Some(caps) = QUERY_NAME_RE.captures(query.as_ref()) {
+        let delete = caps.name("delete").unwrap();
+        let range = delete.start()..delete.end();
+        query.to_mut().replace_range(range, "");
+    }
+    (query, vars)
+}
+
 /// The heart of the `process` subcommand. Expects a logfile containing
 /// query logs on the command line.
 fn process(
@@ -378,45 +427,6 @@ fn process(
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
     let mut sql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
-
-    /// Canonicalize queries so that queries that only differ in argument
-    /// values are considered equal and summarized together. We do this by
-    /// looking for arguments and turning something like
-    /// `things(where: { color: "blue" })` into
-    /// `things(where: { color: $color })`. This is mostly based on
-    /// heuristics since we don't want to fully parse GraphQL to keep
-    /// logfile processing reasonably fast.
-    ///
-    /// Returns the rewritten query and a string that contains the
-    /// variable values in JSON form (`{ color: "blue" }`)
-    fn canonicalize<'a>(query: &'a str, vars: Option<&str>) -> (Cow<'a, str>, Option<String>) {
-        // If the query had explicit variables, just use those, don't try
-        // to guess and extract them
-        if let Some(vars) = vars {
-            if vars.len() > 0 && vars != "{}" && vars != "null" {
-                return (Cow::from(query), Some(vars.to_owned()));
-            }
-        }
-
-        if VAR_RE.is_match(query) {
-            let mut vars = String::new();
-            write!(&mut vars, "{{ ").unwrap();
-            let mut count = 0;
-            let query = VAR_RE.replace_all(query, |caps: &Captures| {
-                if count > 0 {
-                    write!(&mut vars, ", ").unwrap();
-                }
-
-                count += 1;
-                write!(vars, "{}{}: {}", &caps[1], count, &caps[2]).unwrap();
-                format!("{}: ${}{}", &caps[1], &caps[1], count)
-            });
-            write!(vars, " }}").unwrap();
-            (query, Some(vars))
-        } else {
-            (Cow::from(query), None)
-        }
-    }
 
     let start = Instant::now();
     let mut gql_lines: usize = 0;
@@ -1078,5 +1088,15 @@ mod tests {
             Some("QmZawMfSrDUr1rYAW9b5rSckGoRCw8tN77WXFbLNEKXPGz"),
             field(&caps, "sid")
         );
+    }
+
+    #[test]
+    fn test_gql_query_name_fix() {
+        const QUERY: &str =
+            "query GraphQL__Client__OperationDefinition_70073834585800 { tokens { symbol } }";
+        const CANONICAL: &str = "query GraphQL__Client__OperationDefinition { tokens { symbol } }";
+        let (query, vars) = canonicalize(QUERY, None);
+        assert_eq!(None, vars);
+        assert_eq!(CANONICAL, query);
     }
 }
