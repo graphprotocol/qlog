@@ -45,6 +45,7 @@ lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref GQL_QUERY_RE: Regex = Regex::new(
         " Query timing \\(GraphQL\\), \
+          (?:block: [0-9]+, )\
           (cached: (?P<cached>true|false), )?\
          query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
