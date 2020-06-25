@@ -45,7 +45,8 @@ lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
     static ref GQL_QUERY_RE: Regex = Regex::new(
         " Query timing \\(GraphQL\\), \
-          (?:block: [0-9]+, )\
+          complexity: (?P<complexity>[0-9]+), \
+          (?:block: (?P<block>[0-9]+), )?\
           (cached: (?P<cached>true|false), )?\
          query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
@@ -239,6 +240,8 @@ struct QueryInfo {
     max_uuid: String,
     /// The variables used in the slowest query
     max_variables: Option<String>,
+    /// The complexity of the slowest query
+    max_complexity: u64,
     /// The number of times this query took longer than `SLOW_THRESHOLD`
     slow_count: u64,
     /// The number of times the query has been run
@@ -271,6 +274,7 @@ impl QueryInfo {
             max_time: 0,
             max_uuid: "(none)".to_owned(),
             max_variables: None,
+            max_complexity: 0,
             slow_count: 0,
             calls: 0,
             cached_count: 0,
@@ -279,7 +283,7 @@ impl QueryInfo {
         }
     }
 
-    fn add(&mut self, time: u64, query_id: &str, variables: Option<Cow<'_, str>>, cached: bool) {
+    fn add(&mut self, time: u64, query_id: &str, variables: Option<Cow<'_, str>>, cached: bool, complexity: u64) {
         if cached {
             self.cached_count += 1;
             self.cached_time += time;
@@ -294,6 +298,7 @@ impl QueryInfo {
                 self.max_time = time;
                 self.max_uuid = query_id.to_owned();
                 self.max_variables = variables.map(|vars| vars.into_owned());
+                self.max_complexity = complexity;
             }
             if time > SLOW_THRESHOLD {
                 self.slow_count += 1;
@@ -328,6 +333,7 @@ impl QueryInfo {
             self.max_time = other.max_time;
             self.max_uuid = other.max_uuid.clone();
             self.max_variables = other.max_variables.clone();
+            self.max_complexity = other.max_complexity.clone();
         }
         self.slow_count += other.slow_count;
 
@@ -354,6 +360,7 @@ fn field<'a>(caps: &'a Captures, group: &str) -> Option<&'a str> {
 fn add_entry(
     queries: &mut BTreeMap<u64, QueryInfo>,
     query_time: &str,
+    complexity: u64,
     query_id: &str,
     query: Cow<'_, str>,
     variables: Option<Cow<'_, str>>,
@@ -369,7 +376,7 @@ fn add_entry(
     let info = queries
         .entry(hsh)
         .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1));
-    info.add(query_time, &query_id, variables, cached);
+    info.add(query_time, &query_id, variables, cached, complexity);
     Ok(())
 }
 
@@ -441,8 +448,9 @@ fn process(
             mtch += mtch_start.elapsed();
             gql_lines += 1;
             let cached = field(&caps, "cached").map(|v| v == "true").unwrap_or(false);
-            if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
+            if let (Some(query_time), Some(complexity), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
+                field(&caps, "complexity"),
                 field(&caps, "query"),
                 field(&caps, "qid"),
                 field(&caps, "sid"),
@@ -454,6 +462,7 @@ fn process(
                 add_entry(
                     &mut gql_queries,
                     query_time,
+                    complexity.parse::<u64>().unwrap(),
                     query_id,
                     query,
                     variables,
@@ -465,8 +474,9 @@ fn process(
         } else if let Some(caps) = SQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
             sql_lines += 1;
-            if let (Some(time), Some(query), Some(binds), Some(qid), Some(sid)) = (
+            if let (Some(time), Some(complexity), Some(query), Some(binds), Some(qid), Some(sid)) = (
                 field(&caps, "time"),
+                field(&caps, "complexity"),
                 field(&caps, "query"),
                 field(&caps, "binds"),
                 field(&caps, "qid"),
@@ -475,6 +485,7 @@ fn process(
                 add_entry(
                     &mut sql_queries,
                     time,
+                    complexity.parse::<u64>().unwrap(),
                     qid,
                     Cow::from(query),
                     Some(Cow::from(binds)),
@@ -558,8 +569,8 @@ fn print_stats(queries: Vec<QueryInfo>) {
     {
         writeln!(
             stdout,
-            "| {:^7} | {:^8} | {:^12} | {:^6} | {:^6} | {:^6} | {:^6} |",
-            "QID", "calls", "total", "avg", "stddev", "max", "slow"
+            "| {:^7} | {:^8} | {:^8} | {:^12} | {:^6} | {:^6} | {:^6} | {:^6} |",
+            "QID", "calls", "complexity", "total", "avg", "stddev", "max", "slow"
         );
         writeln!(
             stdout,
@@ -571,9 +582,10 @@ fn print_stats(queries: Vec<QueryInfo>) {
         {
             writeln!(
                 stdout,
-                "| Q{:0>6} | {:>8} | {:>12} | {:>6.0} | {:>6.0} | {:>6} | {:>6} |",
+                "| Q{:0>6} | {:>8} | {:>8} | {:>12} | {:>6.0} | {:>6.0} | {:>6} | {:>6} |",
                 query.id,
                 query.calls,
+                query.max_complexity,
                 query.total_time,
                 query.avg(),
                 query.stddev(),
@@ -695,6 +707,7 @@ fn print_full_query(info: &QueryInfo) {
         writeln!(stdout, "{:=<32} Q{} {:=<32}", "", info.id, "");
         writeln!(stdout, "# subgraph:      {}", info.subgraph);
         writeln!(stdout, "# calls:           {:>12}", info.calls);
+        writeln!(stdout, "# complexity:      {:>12}", info.max_time);
         writeln!(stdout, "# slow_count:      {:>12}", info.slow_count);
         writeln!(
             stdout,
@@ -971,12 +984,15 @@ mod tests {
     #[test]
     fn test_gql_query_re() {
         const LINE1: &str = "Dec 30 20:55:13.071 INFO Query timing (GraphQL), \
+                             complexity: 164, \
                              query_time_ms: 160, \
                              query: query Stuff { things } , \
                              query_id: f-1-4-b-e4, \
                              subgraph_id: QmSuBgRaPh, \
                              component: GraphQlRunner\n";
         const LINE2: &str = "Dec 31 23:59:59.667 INFO Query timing (GraphQL), \
+                             complexity: 1897, \
+                             block: 21458574, \
                              query_time_ms: 125, \
                              variables: {}, \
                              query: query { things(id:\"1\") { id }} , \
@@ -984,6 +1000,8 @@ mod tests {
                              subgraph_id: QmSuBgRaPh, \
                              component: GraphQlRunner";
         const LINE3: &str = "Dec 31 23:59:59.739 INFO Query timing (GraphQL), \
+                             complexity: 837, \
+                             block: 21458574, \
                              query_time_ms: 14, \
                              variables: null, \
                              query: query TranscoderQuery { transcoders(first: 1) { id } } , \
@@ -991,6 +1009,8 @@ mod tests {
                              subgraph_id: QmeYBGccAwahY, \
                              component: GraphQlRunner";
         const LINE4: &str = "Dec 31 23:59:59.846 INFO Query timing (GraphQL), \
+             complexity: 164, \
+             block: 21458574, \
              query_time_ms: 12, \
              variables: {\"id\":\"0xdeadbeef\"}, \
              query: query exchange($id: String!) { exchange(id: $id) { id tokenAddress } } , \
@@ -998,7 +1018,9 @@ mod tests {
              subgraph_id: QmSuBgRaPh, \
              component: GraphQlRunner";
 
-        const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
+        const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), complexity: 746, block: 21458574, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
+
+        const LINE6: &str = "Jun 26 21:16:45.288 INFO Query timing (GraphQL), complexity: 0, block: 10343788, cached: false, query_time_ms: 2, variables: {\"account\":\"0xadeeb9d09b8bcee10943198fb6f6a4229bab3675\"}, query: query CreditBalances($account: ID!) { account(id: $account) { creditBalances { amount __typename } __typename } } , query_id: c87b6839-e8dd-44e4-8dcc-150b5dde7ee7, subgraph_id: QmUYnBAoCKATo3PdtoyaoKjXLafV8BLmZNMQYMcKgSeq6p, component: GraphQlRunner";
 
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
@@ -1009,6 +1031,8 @@ mod tests {
         assert_eq!(None, field(&caps, "cached"));
 
         let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
+        assert_eq!(Some("1897"), field(&caps, "complexity"));
+        assert_eq!(Some("21458574"), field(&caps, "block"));
         assert_eq!(Some("125"), field(&caps, "time"));
         assert_eq!(
             Some("query { things(id:\"1\") { id }}"),
@@ -1047,11 +1071,24 @@ mod tests {
             Some("{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}"),
             field(&caps, "vars")
         );
+
+        let caps = GQL_QUERY_RE.captures(LINE6).unwrap();
+        assert_eq!(Some("2"), field(&caps, "time"));
+        assert_eq!(Some("false"), field(&caps, "cached"));
+        // Skip the query, it's big
+        assert_eq!(Some("c87b6839-e8dd-44e4-8dcc-150b5dde7ee7"), field(&caps, "qid"));
+        assert_eq!(Some("QmUYnBAoCKATo3PdtoyaoKjXLafV8BLmZNMQYMcKgSeq6p"), field(&caps, "sid"));
+        assert_eq!(
+            Some("{\"account\":\"0xadeeb9d09b8bcee10943198fb6f6a4229bab3675\"}"),
+            field(&caps, "vars")
+        );
     }
 
     #[test]
     fn test_gql_query_re_with_cache() {
-        const LINE1: &str = "INFO Query timing (GraphQL), cached: true, \
+        const LINE1: &str = "INFO Query timing (GraphQL), complexity: 0, \
+          block: 21458574, \
+          cached: true, \
           query_time_ms: 23, variables: null, \
           query: { things { id timestamp } } , \
           query_id: ed3d5fd7-9c86-4a68-8957-657d84c24aec, \
@@ -1061,6 +1098,7 @@ mod tests {
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("true"), field(&caps, "cached"));
         assert_eq!(Some("Qmsubgraph"), field(&caps, "sid"));
+        assert_eq!(Some("0"), field(&caps, "complexity"));
     }
 
     #[test]
