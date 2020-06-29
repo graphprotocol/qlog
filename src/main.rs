@@ -1020,7 +1020,7 @@ mod tests {
 
         const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), complexity: 746, block: 21458574, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
 
-        const LINE6: &str = "Jun 26 21:16:45.288 INFO Query timing (GraphQL), complexity: 0, block: 10343788, cached: false, query_time_ms: 2, variables: {\"account\":\"0xadeeb9d09b8bcee10943198fb6f6a4229bab3675\"}, query: query CreditBalances($account: ID!) { account(id: $account) { creditBalances { amount __typename } __typename } } , query_id: c87b6839-e8dd-44e4-8dcc-150b5dde7ee7, subgraph_id: QmUYnBAoCKATo3PdtoyaoKjXLafV8BLmZNMQYMcKgSeq6p, component: GraphQlRunner";
+        const LINE6: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), complexity: 0, block: 10344025, cached: false, query_time_ms: 10, variables: null, query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , query_id: cb9af68f-ae60-4dba-b9b3-89aee6fe8eca, subgraph_id: QmaSnuftHCxv7b5b, component: GraphQlRunner";
 
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
@@ -1073,14 +1073,17 @@ mod tests {
         );
 
         let caps = GQL_QUERY_RE.captures(LINE6).unwrap();
-        assert_eq!(Some("2"), field(&caps, "time"));
+        assert_eq!(Some("10"), field(&caps, "time"));
         assert_eq!(Some("false"), field(&caps, "cached"));
-        // Skip the query, it's big
-        assert_eq!(Some("c87b6839-e8dd-44e4-8dcc-150b5dde7ee7"), field(&caps, "qid"));
-        assert_eq!(Some("QmUYnBAoCKATo3PdtoyaoKjXLafV8BLmZNMQYMcKgSeq6p"), field(&caps, "sid"));
+        assert_eq!(Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"), field(&caps, "qid"));
+        assert_eq!(Some("QmaSnuftHCxv7b5b"), field(&caps, "sid"));
         assert_eq!(
-            Some("{\"account\":\"0xadeeb9d09b8bcee10943198fb6f6a4229bab3675\"}"),
+            Some("null"),
             field(&caps, "vars")
+        );
+        assert_eq!(
+            Some("{ rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } }"),
+            field(&caps, "query")
         );
     }
 
