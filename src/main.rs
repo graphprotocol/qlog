@@ -283,7 +283,14 @@ impl QueryInfo {
         }
     }
 
-    fn add(&mut self, time: u64, query_id: &str, variables: Option<Cow<'_, str>>, cached: bool, complexity: u64) {
+    fn add(
+        &mut self,
+        time: u64,
+        query_id: &str,
+        variables: Option<Cow<'_, str>>,
+        cached: bool,
+        complexity: u64,
+    ) {
         if cached {
             self.cached_count += 1;
             self.cached_time += time;
@@ -448,7 +455,13 @@ fn process(
             mtch += mtch_start.elapsed();
             gql_lines += 1;
             let cached = field(&caps, "cached").map(|v| v == "true").unwrap_or(false);
-            if let (Some(query_time), Some(complexity), Some(query), Some(query_id), Some(subgraph)) = (
+            if let (
+                Some(query_time),
+                Some(complexity),
+                Some(query),
+                Some(query_id),
+                Some(subgraph),
+            ) = (
                 field(&caps, "time"),
                 field(&caps, "complexity"),
                 field(&caps, "query"),
@@ -1022,6 +1035,8 @@ mod tests {
 
         const LINE6: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), complexity: 0, block: 10344025, cached: false, query_time_ms: 10, variables: null, query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , query_id: cb9af68f-ae60-4dba-b9b3-89aee6fe8eca, subgraph_id: QmaSnuftHCxv7b5b, component: GraphQlRunner";
 
+        const LINE7: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), complexity: 0, block: 10344025, cached: false, query_time_ms: 10, variables: null, query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , query_id: cb9af68f-ae60-4dba-b9b3-89aee6fe8eca, subgraph_id: QmaSnuftHCxv7b5b, component: GraphQlRunner";
+
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
         assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
@@ -1075,16 +1090,26 @@ mod tests {
         let caps = GQL_QUERY_RE.captures(LINE6).unwrap();
         assert_eq!(Some("10"), field(&caps, "time"));
         assert_eq!(Some("false"), field(&caps, "cached"));
-        assert_eq!(Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"), field(&caps, "qid"));
-        assert_eq!(Some("QmaSnuftHCxv7b5b"), field(&caps, "sid"));
         assert_eq!(
-            Some("null"),
-            field(&caps, "vars")
+            Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
+            field(&caps, "qid")
         );
+        assert_eq!(Some("QmaSnuftHCxv7b5b"), field(&caps, "sid"));
+        assert_eq!(Some("null"), field(&caps, "vars"));
         assert_eq!(
             Some("{ rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } }"),
-            field(&caps, "query")
+            field(&caps, "query"));
+
+        let caps = GQL_QUERY_RE.captures(LINE7).unwrap();
+        assert_eq!(Some("10"), field(&caps, "time"));
+        assert_eq!(Some("false"), field(&caps, "cached"));
+        // Skip the query, it's big
+        assert_eq!(
+            Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
+            field(&caps, "qid")
         );
+        assert_eq!(Some("QmaSnuftHCxv7b5b"), field(&caps, "sid"));
+        assert_eq!(Some("null"), field(&caps, "vars"));
     }
 
     #[test]
