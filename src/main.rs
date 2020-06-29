@@ -241,6 +241,7 @@ struct QueryInfo {
     /// The variables used in the slowest query
     max_variables: Option<String>,
     /// The complexity of the slowest query
+    #[serde(default = "zero")]
     max_complexity: u64,
     /// The number of times this query took longer than `SLOW_THRESHOLD`
     slow_count: u64,
