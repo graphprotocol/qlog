@@ -47,7 +47,7 @@ lazy_static! {
         " Query timing \\(GraphQL\\), \
           (?:complexity: (?P<complexity>[0-9]+), )?\
           (?:block: (?P<block>[0-9]+), )?\
-          (cached: (?P<cached>true|false), )?\
+          (cached: (?P<cached>[a-zA-Z0-9_-]+), )?\
          query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
          query: (?P<query>.*) , \
@@ -1039,7 +1039,7 @@ mod tests {
         const LINE7: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), \
                              complexity: 0, \
                              block: 10344025, \
-                             cached: false, \
+                             cached: herd-hit, \
                              query_time_ms: 10, \
                              variables: null, \
                              query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
@@ -1116,7 +1116,7 @@ mod tests {
         assert_eq!(Some("0"), field(&caps, "complexity"));
         assert_eq!(Some("10344025"), field(&caps, "block"));
         assert_eq!(Some("10"), field(&caps, "time"));
-        assert_eq!(Some("false"), field(&caps, "cached"));
+        assert_eq!(Some("herd-hit"), field(&caps, "cached"));
         // Skip the query, it's big
         assert_eq!(
             Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
