@@ -2,12 +2,11 @@
 extern crate lazy_static;
 
 use clap::{App, AppSettings, ArgMatches, SubCommand};
+use graphql_parser::parse_query;
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
-use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
-use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
@@ -16,6 +15,7 @@ use std::time::{Duration, Instant};
 mod common;
 mod extract;
 mod sampler;
+mod shape_hash;
 
 use sampler::Sampler;
 
@@ -142,7 +142,8 @@ impl QueryInfo {
         &mut self,
         time: u64,
         query_id: &str,
-        variables: Option<Cow<'_, str>>,
+        query: &str,
+        variables: Option<&str>,
         cached: bool,
         complexity: u64,
     ) {
@@ -159,8 +160,9 @@ impl QueryInfo {
             if time > self.max_time {
                 self.max_time = time;
                 self.max_uuid = query_id.to_owned();
-                self.max_variables = variables.map(|vars| vars.into_owned());
+                self.max_variables = variables.map(|vars| vars.to_owned());
                 self.max_complexity = complexity;
+                self.query = query.to_owned();
             }
             if time > SLOW_THRESHOLD {
                 self.slow_count += 1;
@@ -208,16 +210,44 @@ impl QueryInfo {
 
     /// A hash value that can be calculated without constructing
     /// a `QueryInfo`
-    fn hash(query: &str, subgraph: &str) -> u64 {
+    fn hash(query_id: &str, query: &str, subgraph: &str) -> u64 {
         let mut hasher = DefaultHasher::new();
-        (query, subgraph).hash(&mut hasher);
+
+        if query_id.matches("-").count() == 1 {
+            // A new style query id in the format {shape_hash}-{hash}
+            let shape_hash = query_id.split("-").next().unwrap();
+            u64::from_str_radix(shape_hash, 16).map_err(|e| {
+                eprintln!(
+                    "query_id looks like it has the shape_hash, but apparently not: {}: {}",
+                    shape_hash,
+                    e.to_string()
+                );
+            })
+        } else {
+            parse_query(query)
+                .map_err(|e| {
+                    eprintln!(
+                        "Failed to parse GraphQL query: {}: {}",
+                        e.to_string(),
+                        query
+                    )
+                })
+                .map(|doc| shape_hash::shape_hash(&doc))
+        }
+        .map(|shape_hash|
+            // We have a shape_hash
+            (shape_hash, subgraph).hash(&mut hasher))
+        .unwrap_or_else(|_|
+            // Fall back to the old way of computing hashes
+            (query, subgraph).hash(&mut hasher));
+
         hasher.finish()
     }
 
     fn read(line: &str) -> Result<QueryInfo, serde_json::Error> {
         serde_json::from_str(line).map(|mut info: QueryInfo| {
             if info.hash == 0 {
-                info.hash = QueryInfo::hash(&info.query, &info.subgraph);
+                info.hash = QueryInfo::hash("ignore", &info.query, &info.subgraph);
             }
             info
         })
@@ -238,61 +268,12 @@ fn add_entry(
     cached: bool,
     subgraph: &str,
 ) {
-    let (query, variables) = canonicalize(query, variables);
-    let variables = variables.map(|vars| Cow::from(vars));
-
-    let hsh = QueryInfo::hash(&query, &subgraph);
+    let hsh = QueryInfo::hash(query_id, &query, &subgraph);
     let count = queries.len();
     let info = queries
         .entry(hsh)
-        .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1, hsh));
-    info.add(query_time, &query_id, variables, cached, complexity);
-}
-
-/// Canonicalize queries so that queries that only differ in argument
-/// values are considered equal and summarized together. We do this by
-/// looking for arguments and turning something like
-/// `things(where: { color: "blue" })` into
-/// `things(where: { color: $color })`. This is mostly based on
-/// heuristics since we don't want to fully parse GraphQL to keep
-/// logfile processing reasonably fast.
-///
-/// Returns the rewritten query and a string that contains the
-/// variable values in JSON form (`{ color: "blue" }`)
-fn canonicalize<'a>(query: &'a str, vars: Option<&str>) -> (Cow<'a, str>, Option<String>) {
-    // If the query had explicit variables, just use those, don't try
-    // to guess and extract them
-    if let Some(vars) = vars {
-        if vars.len() > 0 && vars != "{}" && vars != "null" {
-            return (Cow::from(query), Some(vars.to_owned()));
-        }
-    }
-
-    let (mut query, vars) = if VAR_RE.is_match(query) {
-        let mut vars = String::new();
-        write!(&mut vars, "{{ ").unwrap();
-        let mut count = 0;
-        let query = VAR_RE.replace_all(query, |caps: &Captures| {
-            if count > 0 {
-                write!(&mut vars, ", ").unwrap();
-            }
-
-            count += 1;
-            write!(vars, "{}{}: {}", &caps[1], count, &caps[2]).unwrap();
-            format!("{}: ${}{}", &caps[1], &caps[1], count)
-        });
-        write!(vars, " }}").unwrap();
-        (query, Some(vars))
-    } else {
-        (Cow::from(query), None)
-    };
-
-    if let Some(caps) = QUERY_NAME_RE.captures(query.as_ref()) {
-        let delete = caps.name("delete").unwrap();
-        let range = delete.start()..delete.end();
-        query.to_mut().replace_range(range, "");
-    }
-    (query, vars)
+        .or_insert_with(|| QueryInfo::new(query.to_owned(), subgraph.to_owned(), count + 1, hsh));
+    info.add(query_time, &query_id, query, variables, cached, complexity);
 }
 
 /// The heart of the `process` subcommand. Expects a logfile containing
@@ -974,15 +955,5 @@ mod tests {
             Some("QmZawMfSrDUr1rYAW9b5rSckGoRCw8tN77WXFbLNEKXPGz"),
             field(&caps, "sid")
         );
-    }
-
-    #[test]
-    fn test_gql_query_name_fix() {
-        const QUERY: &str =
-            "query GraphQL__Client__OperationDefinition_70073834585800 { tokens { symbol } }";
-        const CANONICAL: &str = "query GraphQL__Client__OperationDefinition { tokens { symbol } }";
-        let (query, vars) = canonicalize(QUERY, None);
-        assert_eq!(None, vars);
-        assert_eq!(CANONICAL, query);
     }
 }
