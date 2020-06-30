@@ -112,6 +112,10 @@ struct QueryInfo {
     /// The maximum time we spent serving a cached query
     #[serde(default = "zero")]
     cached_max_time: u64,
+    /// The hash value for this query; two `QueryInfo` instances with the
+    /// same `hash` are assumed to refer to the same logical query
+    #[serde(default = "zero")]
+    hash: u64,
 }
 
 fn zero() -> u64 {
@@ -119,7 +123,7 @@ fn zero() -> u64 {
 }
 
 impl QueryInfo {
-    fn new(query: String, subgraph: String, id: usize) -> QueryInfo {
+    fn new(query: String, subgraph: String, id: usize, hash: u64) -> QueryInfo {
         QueryInfo {
             query,
             subgraph,
@@ -135,6 +139,7 @@ impl QueryInfo {
             cached_count: 0,
             cached_time: 0,
             cached_max_time: 0,
+            hash,
         }
     }
 
@@ -213,6 +218,15 @@ impl QueryInfo {
         (query, subgraph).hash(&mut hasher);
         hasher.finish()
     }
+
+    fn read(line: &str) -> Result<QueryInfo, serde_json::Error> {
+        serde_json::from_str(line).map(|mut info: QueryInfo| {
+            if info.hash == 0 {
+                info.hash = QueryInfo::hash(&info.query, &info.subgraph);
+            }
+            info
+        })
+    }
 }
 
 fn field<'a>(caps: &'a Captures, group: &str) -> Option<&'a str> {
@@ -240,7 +254,7 @@ fn add_entry(
     let count = queries.len();
     let info = queries
         .entry(hsh)
-        .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1));
+        .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1, hsh));
     info.add(query_time, &query_id, variables, cached, complexity);
     Ok(())
 }
@@ -387,7 +401,7 @@ fn read_summaries(filename: &str) -> Result<Vec<QueryInfo>, std::io::Error> {
     let reader = BufReader::new(file);
     let mut infos = vec![];
     for line in reader.lines() {
-        infos.push(serde_json::from_str(&line?)?);
+        infos.push(QueryInfo::read(&line?)?);
     }
     Ok(infos)
 }
@@ -477,9 +491,8 @@ fn combine(filenames: Vec<&str>) -> Vec<QueryInfo> {
                 err.to_string()
             ))
         }) {
-            let hsh = QueryInfo::hash(&info.query, &info.subgraph);
             infos
-                .entry(hsh)
+                .entry(info.hash)
                 .and_modify(|existing| existing.combine(&info))
                 .or_insert(info);
         }
