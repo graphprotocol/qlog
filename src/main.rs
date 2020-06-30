@@ -12,33 +12,20 @@ use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
-use std::ffi::OsStr;
 use std::fmt::Write as _;
 use std::fs::File;
 use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::time::{Duration, Instant};
-use walkdir::WalkDir;
 
 mod common;
+mod extract;
 mod sampler;
 
 use sampler::Sampler;
 
 /// Queries that take longer than this (in ms) are considered slow
 const SLOW_THRESHOLD: u64 = 1000;
-
-/// When a log line contains this text, we know it's about a GraphQL
-/// query
-const GQL_MARKER: &str = "Query timing (GraphQL)";
-
-/// When a log line contains this text, we know it's about a SQL
-/// query
-const SQL_MARKER: &str = "Query timing (SQL)";
-
-/// StackDriver prefixes lines with this when they were too long, and then
-/// shortens the line
-const TRIMMED: &str = "[Trimmed]";
 
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
@@ -477,66 +464,6 @@ fn print_stats(queries: Vec<QueryInfo>) {
     }
 }
 
-/// The 'extract' subcommand turning a StackDriver logfile into a plain
-/// textual logfile by pulling out the 'textPayload' for each entry
-fn extract(
-    dir: &str,
-    gql: &mut dyn Write,
-    sql: &mut dyn Write,
-    verbose: bool,
-) -> Result<(), std::io::Error> {
-    let json_ext = OsStr::new("json");
-    let mut stdout = io::stdout();
-    let mut trimmed_count: usize = 0;
-    let mut count: usize = 0;
-
-    for entry in WalkDir::new(dir) {
-        let entry = entry?;
-
-        if entry.file_type().is_file() && entry.path().extension() == Some(&json_ext) {
-            use serde_json::Value;
-
-            if verbose {
-                eprintln!("Reading {}", entry.path().to_string_lossy());
-            }
-            let file = File::open(entry.path())?;
-            let reader = BufReader::new(file);
-
-            // Going line by line is much faster than using
-            // serde_json::Deserializer::from_reader(reader).into_iter();
-            for line in reader.lines() {
-                count += 1;
-                if let Value::Object(map) = serde_json::from_str(&line?)? {
-                    if let Some(Value::String(text)) = map.get("textPayload") {
-                        let res = if text.contains(TRIMMED) {
-                            trimmed_count += 1;
-                            Ok(0)
-                        } else if text.contains(SQL_MARKER) {
-                            sql.write(text.as_bytes())
-                        } else if text.contains(GQL_MARKER) {
-                            gql.write(text.as_bytes())
-                        } else {
-                            stdout.write(text.as_bytes())
-                        };
-                        if let Err(e) = res {
-                            if e.kind() == std::io::ErrorKind::BrokenPipe {
-                                return Ok(());
-                            } else {
-                                return Err(e);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    eprintln!(
-        "Skipped {} trimmed lines out of {} lines",
-        trimmed_count, count
-    );
-    Ok(())
-}
-
 /// The 'combine' subcommand. Reads summaries from 'filenames' and prints
 /// the summary resulting from combining all those summaries
 fn combine(filenames: Vec<&str>) -> Vec<QueryInfo> {
@@ -702,7 +629,7 @@ fn main() {
             let verbose = args.is_present("verbose");
             let mut gql = writer_for(args, "graphql");
             let mut sql = writer_for(args, "sql");
-            extract(dir, &mut gql, &mut sql, verbose)
+            extract::run(dir, &mut gql, &mut sql, verbose)
                 .unwrap_or_else(|err| die(&format!("extract: {}", err.to_string())));
         }
         ("process", Some(args)) => {
