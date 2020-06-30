@@ -7,7 +7,6 @@ extern crate serde_json;
 extern crate walkdir;
 
 use clap::{App, AppSettings, ArgMatches, SubCommand};
-use rand::{prelude::Rng, rngs::SmallRng, SeedableRng};
 use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
@@ -20,6 +19,11 @@ use std::hash::{Hash, Hasher};
 use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::time::{Duration, Instant};
 use walkdir::WalkDir;
+
+mod common;
+mod sampler;
+
+use sampler::Sampler;
 
 /// Queries that take longer than this (in ms) are considered slow
 const SLOW_THRESHOLD: u64 = 1000;
@@ -35,11 +39,6 @@ const SQL_MARKER: &str = "Query timing (SQL)";
 /// StackDriver prefixes lines with this when they were too long, and then
 /// shortens the line
 const TRIMMED: &str = "[Trimmed]";
-
-/// The index-node status API and the API for the subgraph of subgraphs logs
-/// requests under these subgraph names. We ignore them when we sample queries
-const INDEX_NODE_SUBGRAPH: &str = "indexnode";
-const SUBGRAPHS_SUBGRAPH: &str = "subgraphs";
 
 lazy_static! {
     /// The regexp we use to extract data about GraphQL queries from log files
@@ -86,138 +85,6 @@ lazy_static! {
 pub fn die(msg: &str) -> ! {
     println!("{}", msg);
     std::process::exit(1);
-}
-
-struct Sample {
-    query: String,
-    variables: Option<String>,
-}
-
-impl Sample {
-    fn new(query: &str, variables: &Option<&str>) -> Self {
-        let vars = variables.and_then(|vars| {
-            if vars.is_empty() || vars == "{}" || vars == "null" {
-                None
-            } else {
-                Some(vars.to_owned())
-            }
-        });
-        Sample {
-            query: query.to_owned(),
-            variables: vars,
-        }
-    }
-}
-
-/// A collection of query samples; we use one of these for each subgraph.
-struct SampleDomain {
-    /// The total number of unique queries we have seen
-    seen_count: usize,
-    /// The hashes of unique `(query, variables)` combinations
-    seen: HashSet<u64>,
-    /// Up to `Sampler.size` distinct samples
-    samples: Vec<Sample>,
-}
-
-impl Default for SampleDomain {
-    fn default() -> Self {
-        SampleDomain {
-            seen_count: 0,
-            seen: HashSet::default(),
-            samples: Vec::default(),
-        }
-    }
-}
-
-impl SampleDomain {
-    /// If we have not seen `(query, variables)` before, add them to our samples
-    /// so that in the end the probability that any unique query is in our
-    /// final sample is `size / N` where `N` is the number of distinct queries
-    fn sample(&mut self, size: usize, rng: &mut SmallRng, query: &str, variables: &Option<&str>) {
-        let hash = {
-            let mut hasher = DefaultHasher::new();
-            (query, variables).hash(&mut hasher);
-            hasher.finish()
-        };
-
-        // We sample distinct queries
-        if !self.seen.contains(&hash) {
-            // Sample uniformly, i.e. if there are N distinct queries for a
-            // subgraph in the file we are processing, the probabilty that any
-            // one query winds up in the sample is `size/N`
-            if self.seen_count < size {
-                self.samples.push(Sample::new(query, variables));
-            } else {
-                let k = rng.gen_range(0, self.seen_count + 1);
-                if k < size {
-                    let samples = Sample::new(query, variables);
-                    if let Some(entry) = self.samples.get_mut(k) {
-                        *entry = samples;
-                    }
-                }
-            }
-            self.seen_count += 1;
-            self.seen.insert(hash);
-        }
-    }
-}
-
-struct Sampler {
-    size: usize,
-    rng: SmallRng,
-    samples: BTreeMap<String, SampleDomain>,
-    subgraphs: HashSet<String>,
-}
-
-impl Sampler {
-    fn new(size: usize, subgraphs: HashSet<String>) -> Self {
-        Sampler {
-            size,
-            rng: SmallRng::from_entropy(),
-            samples: BTreeMap::new(),
-            subgraphs,
-        }
-    }
-
-    fn sample<'b>(&mut self, query: &str, variables: &Option<&str>, subgraph: &'b str) {
-        if self.size == 0
-            || subgraph == INDEX_NODE_SUBGRAPH
-            || subgraph == SUBGRAPHS_SUBGRAPH
-            || (!self.subgraphs.is_empty() && !self.subgraphs.contains(subgraph))
-        {
-            return;
-        }
-
-        let domain = {
-            match self.samples.get_mut(subgraph) {
-                Some(samples) => samples,
-                None => self.samples.entry(subgraph.to_owned()).or_default(),
-            }
-        };
-
-        domain.sample(self.size, &mut self.rng, query, variables);
-    }
-
-    fn write(&self, mut out: BufWriter<File>) -> Result<(), std::io::Error> {
-        #[derive(Serialize)]
-        struct SampleOutput<'a> {
-            subgraph: &'a String,
-            query: &'a String,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            variables: &'a Option<String>,
-        }
-        for (subgraph, domain) in &self.samples {
-            for sample in &domain.samples {
-                let v = SampleOutput {
-                    subgraph,
-                    query: &sample.query,
-                    variables: &sample.variables,
-                };
-                writeln!(out, "{}", serde_json::to_string(&v)?)?;
-            }
-        }
-        Ok(())
-    }
 }
 
 /// The statistics we maintain about each query; we keep queries unique
