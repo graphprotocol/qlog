@@ -1,10 +1,5 @@
-extern crate clap;
-extern crate regex;
 #[macro_use]
 extern crate lazy_static;
-extern crate serde;
-extern crate serde_json;
-extern crate walkdir;
 
 use clap::{App, AppSettings, ArgMatches, SubCommand};
 use regex::{Captures, Regex};
