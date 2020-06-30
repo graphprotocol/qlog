@@ -235,28 +235,23 @@ fn field<'a>(caps: &'a Captures, group: &str) -> Option<&'a str> {
 
 fn add_entry(
     queries: &mut BTreeMap<u64, QueryInfo>,
-    query_time: &str,
+    query_time: u64,
     complexity: u64,
     query_id: &str,
     query: &str,
     variables: Option<&str>,
     cached: bool,
     subgraph: &str,
-) -> Result<(), ()> {
+) {
     let (query, variables) = canonicalize(query, variables);
     let variables = variables.map(|vars| Cow::from(vars));
 
-    let query_time: u64 = match query_time.parse() {
-        Err(_) => return Err(()),
-        Ok(qt) => qt,
-    };
     let hsh = QueryInfo::hash(&query, &subgraph);
     let count = queries.len();
     let info = queries
         .entry(hsh)
         .or_insert_with(|| QueryInfo::new(query.into_owned(), subgraph.to_owned(), count + 1, hsh));
     info.add(query_time, &query_id, variables, cached, complexity);
-    Ok(())
 }
 
 /// Canonicalize queries so that queries that only differ in argument
@@ -341,6 +336,10 @@ fn process(
                 field(&caps, "sid"),
             ) {
                 let variables = field(&caps, "vars");
+                let query_time: u64 = query_time.parse().unwrap_or_else(|_| {
+                    eprintln!("invalid query_time: {}", line);
+                    0
+                });
                 sampler.sample(&query, &variables, &subgraph);
                 add_entry(
                     &mut gql_queries,
@@ -351,8 +350,7 @@ fn process(
                     variables,
                     cached,
                     subgraph,
-                )
-                .unwrap_or_else(|_| eprintln!("not a query: {}", line));
+                );
             }
         } else if let Some(caps) = SQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
@@ -365,6 +363,10 @@ fn process(
                 field(&caps, "qid"),
                 field(&caps, "sid"),
             ) {
+                let time: u64 = time.parse().unwrap_or_else(|_| {
+                    eprintln!("invalid query_time: {}", line);
+                    0
+                });
                 add_entry(
                     &mut sql_queries,
                     time,
@@ -374,8 +376,7 @@ fn process(
                     Some(binds),
                     false,
                     sid,
-                )
-                .unwrap_or_else(|_| eprintln!("not a query: {}", line));
+                );
             }
         } else if print_extra {
             eprintln!("not a query: {}", line);
