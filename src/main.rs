@@ -65,7 +65,7 @@ lazy_static! {
 }
 
 pub fn die(msg: &str) -> ! {
-    println!("{}", msg);
+    eprintln!("{}", msg);
     std::process::exit(1);
 }
 
