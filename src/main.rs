@@ -224,11 +224,14 @@ fn add_entry(
     query_time: &str,
     complexity: u64,
     query_id: &str,
-    query: Cow<'_, str>,
-    variables: Option<Cow<'_, str>>,
+    query: &str,
+    variables: Option<&str>,
     cached: bool,
     subgraph: &str,
 ) -> Result<(), ()> {
+    let (query, variables) = canonicalize(query, variables);
+    let variables = variables.map(|vars| Cow::from(vars));
+
     let query_time: u64 = match query_time.parse() {
         Err(_) => return Err(()),
         Ok(qt) => qt,
@@ -325,8 +328,6 @@ fn process(
             ) {
                 let variables = field(&caps, "vars");
                 sampler.sample(&query, &variables, &subgraph);
-                let (query, variables) = canonicalize(query, variables);
-                let variables = variables.map(|vars| Cow::from(vars));
                 add_entry(
                     &mut gql_queries,
                     query_time,
@@ -355,8 +356,8 @@ fn process(
                     time,
                     complexity.parse::<u64>().unwrap(),
                     qid,
-                    Cow::from(query),
-                    Some(Cow::from(binds)),
+                    query,
+                    Some(binds),
                     false,
                     sid,
                 )
