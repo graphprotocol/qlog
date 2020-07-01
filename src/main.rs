@@ -298,19 +298,13 @@ fn process(
             mtch += mtch_start.elapsed();
             gql_lines += 1;
             let cached = field(&caps, "cached").map(|v| v == "true").unwrap_or(false);
-            if let (
-                Some(query_time),
-                Some(complexity),
-                Some(query),
-                Some(query_id),
-                Some(subgraph),
-            ) = (
+            if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
-                field(&caps, "complexity"),
                 field(&caps, "query"),
                 field(&caps, "qid"),
                 field(&caps, "sid"),
             ) {
+                let complexity = field(&caps, "complexity").unwrap_or("0");
                 let variables = field(&caps, "vars");
                 let query_time: u64 = query_time.parse().unwrap_or_else(|_| {
                     eprintln!("invalid query_time: {}", line);
@@ -832,6 +826,15 @@ mod tests {
                              query_id: cb9af68f-ae60-4dba-b9b3-89aee6fe8eca, \
                              subgraph_id: QmaSubgraph, component: GraphQlRunner";
 
+        const LINE8: &str = "Jun 25 10:00:00.074 INFO Query timing (GraphQL), \
+                             block: 10334284, \
+                             cached: false, \
+                             query_time_ms: 7, \
+                             variables: null, \
+                             query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sUSD\", timestamp_gte: 1592992799, timestamp_lte: 1593079199}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
+                             query_id: e020b60e-478f-41ce-b555-82d1ad88050b, \
+                             subgraph_id: QmaSubgraph, component: GraphQlRunner";
+
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
         assert_eq!(Some("160"), field(&caps, "time"));
         assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
@@ -908,6 +911,13 @@ mod tests {
             Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
             field(&caps, "qid")
         );
+        assert_eq!(Some("QmaSubgraph"), field(&caps, "sid"));
+        assert_eq!(Some("null"), field(&caps, "vars"));
+
+        let caps = GQL_QUERY_RE.captures(LINE8).unwrap();
+        assert_eq!(None, field(&caps, "complexity"));
+        assert_eq!(Some("10334284"), field(&caps, "block"));
+        assert_eq!(Some("7"), field(&caps, "time"));
         assert_eq!(Some("QmaSubgraph"), field(&caps, "sid"));
         assert_eq!(Some("null"), field(&caps, "vars"));
     }
