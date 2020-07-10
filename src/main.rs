@@ -297,7 +297,7 @@ fn process(
         if let Some(caps) = GQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
-            let cached = field(&caps, "cached").map(|v| v == "true").unwrap_or(false);
+            let cached = field(&caps, "cached").map(|v| v == "hit" || v == "shared").unwrap_or(false);
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
                 field(&caps, "query"),
