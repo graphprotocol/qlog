@@ -297,7 +297,9 @@ fn process(
         if let Some(caps) = GQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
-            let cached = field(&caps, "cached").map(|v| v == "hit" || v == "shared").unwrap_or(false);
+            let cached = field(&caps, "cached")
+                .map(|v| v == "hit" || v == "shared")
+                .unwrap_or(false);
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
                 field(&caps, "query"),
@@ -562,7 +564,7 @@ fn main() {
                 .args_from_usage(
                     "-v, --verbose  'Print which files are being read on stderr'
                     graphql -g, --graphql=<FILE> 'Write GraphQL summary to this file'
-                    sql -s, --sql=<FILE> 'Write SQL summary to this file'
+                    [sql] -s, --sql=<FILE> 'Write SQL summary to this file'
                     <dir> 'The directory containing StackDriver files'",
                 ),
         )
