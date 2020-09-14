@@ -28,7 +28,6 @@ lazy_static! {
         " Query timing \\(GraphQL\\), \
           (?:complexity: (?P<complexity>[0-9]+), )?\
           block: (?P<block>[0-9]+), \
-          (cached: (?P<cached>[a-zA-Z0-9_-]+), )?\
          query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
          query: (?P<query>.*) , \
@@ -81,15 +80,6 @@ struct QueryInfo {
     calls: u64,
     /// An ID to make it easier to refer to the query for the user
     id: usize,
-    /// The number of query executions that were served from cache
-    #[serde(default = "zero")]
-    cached_count: u64,
-    /// The total time we spent serving cached queries
-    #[serde(default = "zero")]
-    cached_time: u64,
-    /// The maximum time we spent serving a cached query
-    #[serde(default = "zero")]
-    cached_max_time: u64,
     /// The hash value for this query; two `QueryInfo` instances with the
     /// same `hash` are assumed to refer to the same logical query
     #[serde(default = "zero")]
@@ -114,9 +104,6 @@ impl QueryInfo {
             max_complexity: 0,
             slow_count: 0,
             calls: 0,
-            cached_count: 0,
-            cached_time: 0,
-            cached_max_time: 0,
             hash,
         }
     }
@@ -127,16 +114,9 @@ impl QueryInfo {
         query_id: &str,
         query: &str,
         variables: Option<&str>,
-        cached: bool,
         complexity: u64,
     ) {
-        if cached {
-            self.cached_count += 1;
-            self.cached_time += time;
-            if time > self.cached_max_time {
-                self.cached_max_time = time;
-            }
-        } else {
+
             self.calls += 1;
             self.total_time += time;
             self.time_squared += time * time;
@@ -150,7 +130,6 @@ impl QueryInfo {
             if time > SLOW_THRESHOLD {
                 self.slow_count += 1;
             }
-        }
     }
 
     fn avg(&self) -> f64 {
@@ -168,10 +147,6 @@ impl QueryInfo {
         self.variance().sqrt()
     }
 
-    fn cached_avg(&self) -> f64 {
-        self.cached_time as f64 / self.cached_count as f64
-    }
-
     fn combine(&mut self, other: &QueryInfo) {
         self.calls += other.calls;
         self.total_time += other.total_time;
@@ -183,12 +158,6 @@ impl QueryInfo {
             self.max_complexity = other.max_complexity.clone();
         }
         self.slow_count += other.slow_count;
-
-        self.cached_count += other.cached_count;
-        self.cached_time += other.cached_time;
-        if other.cached_max_time > self.cached_max_time {
-            self.cached_max_time = other.cached_max_time;
-        }
     }
 
     /// A hash value that can be calculated without constructing
@@ -248,7 +217,6 @@ fn add_entry(
     query_id: &str,
     query: &str,
     variables: Option<&str>,
-    cached: bool,
     subgraph: &str,
 ) {
     let hsh = QueryInfo::hash(query_id, &query, &subgraph);
@@ -256,7 +224,7 @@ fn add_entry(
     let info = queries
         .entry(hsh)
         .or_insert_with(|| QueryInfo::new(query.to_owned(), subgraph.to_owned(), count + 1, hsh));
-    info.add(query_time, &query_id, query, variables, cached, complexity);
+    info.add(query_time, &query_id, query, variables, complexity);
 }
 
 /// The heart of the `process` subcommand. Expects a logfile containing
@@ -278,9 +246,6 @@ fn process(
         if let Some(caps) = GQL_QUERY_RE.captures(&line) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
-            let cached = field(&caps, "cached")
-                .map(|v| v == "hit" || v == "shared")
-                .unwrap_or(false);
             if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
                 field(&caps, "time"),
                 field(&caps, "query"),
@@ -301,7 +266,6 @@ fn process(
                     query_id,
                     query,
                     variables,
-                    cached,
                     subgraph,
                 );
             }
@@ -465,13 +429,6 @@ fn print_full_query(info: &QueryInfo) {
         writeln!(stdout, "# total_time:      {:>12.1} {}", amount, unit);
         writeln!(stdout, "# avg_time:        {:>12.0} ms", info.avg());
         writeln!(stdout, "# stddev_time:     {:>12.0} ms", info.stddev());
-        if info.cached_count > 0 {
-            writeln!(stdout, "# cached calls:    {:>12}", info.cached_count);
-            let (amount, unit) = human_readable_time(info.cached_time);
-            writeln!(stdout, "# cached time:     {:>12.1} {}", amount, unit);
-            writeln!(stdout, "# cached avg_time: {:>12.0} ms", info.cached_avg());
-            writeln!(stdout, "# cached max_time: {:>12} ms", info.cached_max_time);
-        }
         writeln!(stdout, "# max_time:        {:>12} ms", info.max_time);
         writeln!(stdout, "# max_uuid:      {}", info.max_uuid);
         if let Some(max_vars) = &info.max_variables {
@@ -698,12 +655,6 @@ const QUERY_HELP_TEXT: &str =
 # total_time:      total time the queries took
 # avg_time:        total_time / calls
 # stddev_time:     standard deviation of the time queries took
-# cached calls:    number of query executions that were served
-#                  from cache. Cached executions do not enter
-#                  into the statistics for non-cached executions
-# cached time:     total time spent serving queries from cache
-# cached avg_time: cached time / cached calls
-# cached max_time: maximum time it took to serve a query from cache
 # max_time:        maximum time it took to serve a query from
 #                  the database
 # max_uuid:        query_id of a query that took max_time
@@ -757,7 +708,6 @@ mod tests {
         const LINE6: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), \
                              complexity: 4711, \
                              block: 10344025, \
-                             cached: false, \
                              query_time_ms: 10, \
                              variables: null, \
                              query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
@@ -767,7 +717,6 @@ mod tests {
         const LINE7: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), \
                              complexity: 0, \
                              block: 10344025, \
-                             cached: herd-hit, \
                              query_time_ms: 10, \
                              variables: null, \
                              query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
@@ -776,7 +725,6 @@ mod tests {
 
         const LINE8: &str = "Jun 25 10:00:00.074 INFO Query timing (GraphQL), \
                              block: 10334284, \
-                             cached: false, \
                              query_time_ms: 7, \
                              variables: null, \
                              query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sUSD\", timestamp_gte: 1592992799, timestamp_lte: 1593079199}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
@@ -789,7 +737,6 @@ mod tests {
         assert_eq!(Some("f-1-4-b-e4"), field(&caps, "qid"));
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
         assert_eq!(None, field(&caps, "vars"));
-        assert_eq!(None, field(&caps, "cached"));
 
         let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
         assert_eq!(None, field(&caps, "complexity"));
@@ -837,7 +784,6 @@ mod tests {
         assert_eq!(Some("4711"), field(&caps, "complexity"));
         assert_eq!(Some("10344025"), field(&caps, "block"));
         assert_eq!(Some("10"), field(&caps, "time"));
-        assert_eq!(Some("false"), field(&caps, "cached"));
         // Skip the query, it's big
         assert_eq!(
             Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
@@ -853,7 +799,6 @@ mod tests {
         assert_eq!(Some("0"), field(&caps, "complexity"));
         assert_eq!(Some("10344025"), field(&caps, "block"));
         assert_eq!(Some("10"), field(&caps, "time"));
-        assert_eq!(Some("herd-hit"), field(&caps, "cached"));
         // Skip the query, it's big
         assert_eq!(
             Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
@@ -874,7 +819,6 @@ mod tests {
     fn test_gql_query_re_with_cache() {
         const LINE1: &str = "INFO Query timing (GraphQL), complexity: 0, \
           block: 21458574, \
-          cached: true, \
           query_time_ms: 23, variables: null, \
           query: { things { id timestamp } } , \
           query_id: ed3d5fd7-9c86-4a68-8957-657d84c24aec, \
@@ -882,7 +826,6 @@ mod tests {
           component: GraphQlRunner";
 
         let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
-        assert_eq!(Some("true"), field(&caps, "cached"));
         assert_eq!(Some("Qmsubgraph"), field(&caps, "sid"));
         assert_eq!(Some("0"), field(&caps, "complexity"));
     }
