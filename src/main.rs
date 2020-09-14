@@ -1,9 +1,5 @@
-#[macro_use]
-extern crate lazy_static;
-
 use clap::{App, AppSettings, ArgMatches, SubCommand};
 use graphql_parser::parse_query;
-use regex::{Captures, Regex};
 use serde::{Deserialize, Serialize};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
@@ -13,38 +9,16 @@ use std::io::{self, BufRead, BufReader, BufWriter, Write};
 use std::time::{Duration, Instant};
 
 mod common;
+mod entry;
 mod extract;
 mod sampler;
 mod shape_hash;
 
+use entry::Entry;
 use sampler::Sampler;
 
 /// Queries that take longer than this (in ms) are considered slow
 const SLOW_THRESHOLD: u64 = 1000;
-
-lazy_static! {
-    /// The regexp we use to extract data about GraphQL queries from log files
-    static ref GQL_QUERY_RE: Regex = Regex::new(
-        " Query timing \\(GraphQL\\), \
-          (?:complexity: (?P<complexity>[0-9]+), )?\
-          block: (?P<block>[0-9]+), \
-         query_time_ms: (?P<time>[0-9]+), \
-         variables: (?P<vars>\\{.*\\}|null), \
-         query: (?P<query>.*) , \
-         query_id: (?P<qid>[0-9a-f-]+), \
-         subgraph_id: (?P<sid>[a-zA-Z0-9]*), \
-         component: "
-    )
-    .unwrap();
-
-    /// The regexp for finding arguments in GraphQL queries. This intentionally
-    /// doesn't cover all possible GraphQL values, only numbers and strings
-    static ref VAR_RE: Regex =
-        Regex::new("([_A-Za-z][_0-9A-Za-z]*): *([0-9]+|\"([^\"]|\\\\\")*\"|\\[[^]]*\\])").unwrap();
-
-    static ref QUERY_NAME_RE: Regex =
-    Regex::new("query GraphQL__Client__OperationDefinition(?P<delete>_[0-9]+)").unwrap();
-}
 
 pub fn die(msg: &str) -> ! {
     eprintln!("{}", msg);
@@ -198,10 +172,6 @@ impl QueryInfo {
     }
 }
 
-fn field<'a>(caps: &'a Captures, group: &str) -> Option<&'a str> {
-    caps.name(group).map(|field| field.as_str())
-}
-
 fn add_entry(
     queries: &mut BTreeMap<u64, QueryInfo>,
     query_time: u64,
@@ -232,32 +202,19 @@ fn process(sampler: &mut Sampler, print_extra: bool) -> Result<Vec<QueryInfo>, s
         let line = line?;
 
         let mtch_start = Instant::now();
-        if let Some(caps) = GQL_QUERY_RE.captures(&line) {
+        if let Some(entry) = Entry::parse(&line, None) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
-            if let (Some(query_time), Some(query), Some(query_id), Some(subgraph)) = (
-                field(&caps, "time"),
-                field(&caps, "query"),
-                field(&caps, "qid"),
-                field(&caps, "sid"),
-            ) {
-                let complexity = field(&caps, "complexity").unwrap_or("0");
-                let variables = field(&caps, "vars").unwrap_or("null");
-                let query_time: u64 = query_time.parse().unwrap_or_else(|_| {
-                    eprintln!("invalid query_time: {}", line);
-                    0
-                });
-                sampler.sample(&query, &variables, &subgraph);
-                add_entry(
-                    &mut gql_queries,
-                    query_time,
-                    complexity.parse::<u64>().unwrap(),
-                    query_id,
-                    query,
-                    variables,
-                    subgraph,
-                );
-            }
+            sampler.sample(&entry.query, &entry.variables, &entry.subgraph);
+            add_entry(
+                &mut gql_queries,
+                entry.time,
+                0,
+                entry.query_id,
+                entry.query,
+                entry.variables,
+                entry.subgraph,
+            );
         } else if print_extra {
             eprintln!("not a query: {}", line);
         }
@@ -650,170 +607,3 @@ const QUERY_HELP_TEXT: &str =
 graphql query processed so that most values in filters etc. are
 extracted into variables
 ";
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_gql_query_re() {
-        const LINE1: &str = "Dec 30 20:55:13.071 INFO Query timing (GraphQL), \
-                             block: 10344025, \
-                             query_time_ms: 160, \
-                             variables: null, \
-                             query: query Stuff { things } , \
-                             query_id: f-1-4-b-e4, \
-                             subgraph_id: QmSuBgRaPh, \
-                             component: GraphQlRunner\n";
-        const LINE2: &str = "Dec 31 23:59:59.667 INFO Query timing (GraphQL), \
-                             block: 10344025, \
-                             query_time_ms: 125, \
-                             variables: {}, \
-                             query: query { things(id:\"1\") { id }} , \
-                             query_id: f2-6b-48-b6-6b, \
-                             subgraph_id: QmSuBgRaPh, \
-                             component: GraphQlRunner";
-        const LINE3: &str = "Dec 31 23:59:59.739 INFO Query timing (GraphQL), \
-                             block: 10344025, \
-                             query_time_ms: 14, \
-                             variables: null, \
-                             query: query TranscoderQuery { transcoders(first: 1) { id } } , \
-                             query_id: c5-d3-4e-92-37, \
-                             subgraph_id: QmeYBGccAwahY, \
-                             component: GraphQlRunner";
-        const LINE4: &str = "Dec 31 23:59:59.846 INFO Query timing (GraphQL), \
-             block: 10344025, \
-             query_time_ms: 12, \
-             variables: {\"id\":\"0xdeadbeef\"}, \
-             query: query exchange($id: String!) { exchange(id: $id) { id tokenAddress } } , \
-             query_id: c8-1c-4c-98-65, \
-             subgraph_id: QmSuBgRaPh, \
-             component: GraphQlRunner";
-
-        const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), block: 1234, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
-
-        const LINE6: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), \
-                             complexity: 4711, \
-                             block: 10344025, \
-                             query_time_ms: 10, \
-                             variables: null, \
-                             query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
-                             query_id: cb9af68f-ae60-4dba-b9b3-89aee6fe8eca, \
-                             subgraph_id: QmaSubgraph, component: GraphQlRunner";
-
-        const LINE7: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), \
-                             complexity: 0, \
-                             block: 10344025, \
-                             query_time_ms: 10, \
-                             variables: null, \
-                             query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
-                             query_id: cb9af68f-ae60-4dba-b9b3-89aee6fe8eca, \
-                             subgraph_id: QmaSubgraph, component: GraphQlRunner";
-
-        const LINE8: &str = "Jun 25 10:00:00.074 INFO Query timing (GraphQL), \
-                             block: 10334284, \
-                             query_time_ms: 7, \
-                             variables: null, \
-                             query: { rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sUSD\", timestamp_gte: 1592992799, timestamp_lte: 1593079199}, first: 1000, skip: 0) { id synth rate block timestamp } } , \
-                             query_id: e020b60e-478f-41ce-b555-82d1ad88050b, \
-                             subgraph_id: QmaSubgraph, component: GraphQlRunner";
-
-        let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
-        assert_eq!(Some("160"), field(&caps, "time"));
-        assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
-        assert_eq!(Some("f-1-4-b-e4"), field(&caps, "qid"));
-        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
-        assert_eq!(Some("null"), field(&caps, "vars"));
-
-        let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
-        assert_eq!(None, field(&caps, "complexity"));
-        assert_eq!(Some("10344025"), field(&caps, "block"));
-        assert_eq!(Some("125"), field(&caps, "time"));
-        assert_eq!(
-            Some("query { things(id:\"1\") { id }}"),
-            field(&caps, "query")
-        );
-        assert_eq!(Some("f2-6b-48-b6-6b"), field(&caps, "qid"));
-        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
-        assert_eq!(Some("{}"), field(&caps, "vars"));
-
-        let caps = GQL_QUERY_RE.captures(LINE3).unwrap();
-        assert_eq!(Some("14"), field(&caps, "time"));
-        assert_eq!(
-            Some("query TranscoderQuery { transcoders(first: 1) { id } }"),
-            field(&caps, "query")
-        );
-        assert_eq!(Some("c5-d3-4e-92-37"), field(&caps, "qid"));
-        assert_eq!(Some("QmeYBGccAwahY"), field(&caps, "sid"));
-        assert_eq!(Some("null"), field(&caps, "vars"));
-
-        let caps = GQL_QUERY_RE.captures(LINE4).unwrap();
-        assert_eq!(Some("12"), field(&caps, "time"));
-        assert_eq!(
-            Some("query exchange($id: String!) { exchange(id: $id) { id tokenAddress } }"),
-            field(&caps, "query")
-        );
-        assert_eq!(Some("c8-1c-4c-98-65"), field(&caps, "qid"));
-        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
-        assert_eq!(Some("{\"id\":\"0xdeadbeef\"}"), field(&caps, "vars"));
-
-        let caps = GQL_QUERY_RE.captures(LINE5).unwrap();
-        assert_eq!(Some("2657"), field(&caps, "time"));
-        // Skip the query, it's big
-        assert_eq!(Some("2d-12-4b-a8-6b"), field(&caps, "qid"));
-        assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
-        assert_eq!(
-            Some("{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}"),
-            field(&caps, "vars")
-        );
-
-        let caps = GQL_QUERY_RE.captures(LINE6).unwrap();
-        assert_eq!(Some("4711"), field(&caps, "complexity"));
-        assert_eq!(Some("10344025"), field(&caps, "block"));
-        assert_eq!(Some("10"), field(&caps, "time"));
-        // Skip the query, it's big
-        assert_eq!(
-            Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
-            field(&caps, "qid")
-        );
-        assert_eq!(
-            Some("{ rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } }"),
-            field(&caps, "query"));
-        assert_eq!(Some("QmaSubgraph"), field(&caps, "sid"));
-        assert_eq!(Some("null"), field(&caps, "vars"));
-
-        let caps = GQL_QUERY_RE.captures(LINE7).unwrap();
-        assert_eq!(Some("0"), field(&caps, "complexity"));
-        assert_eq!(Some("10344025"), field(&caps, "block"));
-        assert_eq!(Some("10"), field(&caps, "time"));
-        // Skip the query, it's big
-        assert_eq!(
-            Some("cb9af68f-ae60-4dba-b9b3-89aee6fe8eca"),
-            field(&caps, "qid")
-        );
-        assert_eq!(Some("QmaSubgraph"), field(&caps, "sid"));
-        assert_eq!(Some("null"), field(&caps, "vars"));
-
-        let caps = GQL_QUERY_RE.captures(LINE8).unwrap();
-        assert_eq!(None, field(&caps, "complexity"));
-        assert_eq!(Some("10334284"), field(&caps, "block"));
-        assert_eq!(Some("7"), field(&caps, "time"));
-        assert_eq!(Some("QmaSubgraph"), field(&caps, "sid"));
-        assert_eq!(Some("null"), field(&caps, "vars"));
-    }
-
-    #[test]
-    fn test_gql_query_re_with_cache() {
-        const LINE1: &str = "INFO Query timing (GraphQL), complexity: 0, \
-          block: 21458574, \
-          query_time_ms: 23, variables: null, \
-          query: { things { id timestamp } } , \
-          query_id: ed3d5fd7-9c86-4a68-8957-657d84c24aec, \
-          subgraph_id: Qmsubgraph, \
-          component: GraphQlRunner";
-
-        let caps = GQL_QUERY_RE.captures(LINE1).unwrap();
-        assert_eq!(Some("Qmsubgraph"), field(&caps, "sid"));
-        assert_eq!(Some("0"), field(&caps, "complexity"));
-    }
-}
