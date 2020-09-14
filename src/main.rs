@@ -82,18 +82,17 @@ impl QueryInfo {
         }
     }
 
-    fn add(&mut self, time: u64, query_id: &str, query: &str, variables: &str, complexity: u64) {
+    fn add(&mut self, entry: &Entry) {
         self.calls += 1;
-        self.total_time += time;
-        self.time_squared += time * time;
-        if time > self.max_time {
-            self.max_time = time;
-            self.max_uuid = query_id.to_owned();
-            self.max_variables = variables.to_owned();
-            self.max_complexity = complexity;
-            self.query = query.to_owned();
+        self.total_time += entry.time;
+        self.time_squared += entry.time * entry.time;
+        if entry.time > self.max_time {
+            self.max_time = entry.time;
+            self.max_uuid = entry.query_id.to_owned();
+            self.max_variables = entry.variables.to_owned();
+            self.query = entry.query.to_owned();
         }
-        if time > SLOW_THRESHOLD {
+        if entry.time > SLOW_THRESHOLD {
             self.slow_count += 1;
         }
     }
@@ -172,21 +171,18 @@ impl QueryInfo {
     }
 }
 
-fn add_entry(
-    queries: &mut BTreeMap<u64, QueryInfo>,
-    query_time: u64,
-    complexity: u64,
-    query_id: &str,
-    query: &str,
-    variables: &str,
-    subgraph: &str,
-) {
-    let hsh = QueryInfo::hash(query_id, &query, &subgraph);
+fn add_entry(queries: &mut BTreeMap<u64, QueryInfo>, entry: &Entry) {
+    let hsh = QueryInfo::hash(&entry.query_id, &entry.query, &entry.subgraph);
     let count = queries.len();
-    let info = queries
-        .entry(hsh)
-        .or_insert_with(|| QueryInfo::new(query.to_owned(), subgraph.to_owned(), count + 1, hsh));
-    info.add(query_time, &query_id, query, variables, complexity);
+    let info = queries.entry(hsh).or_insert_with(|| {
+        QueryInfo::new(
+            entry.query.to_owned(),
+            entry.subgraph.to_owned(),
+            count + 1,
+            hsh,
+        )
+    });
+    info.add(entry);
 }
 
 /// The heart of the `process` subcommand. Expects a logfile containing
@@ -206,15 +202,7 @@ fn process(sampler: &mut Sampler, print_extra: bool) -> Result<Vec<QueryInfo>, s
             mtch += mtch_start.elapsed();
             gql_lines += 1;
             sampler.sample(&entry.query, &entry.variables, &entry.subgraph);
-            add_entry(
-                &mut gql_queries,
-                entry.time,
-                0,
-                entry.query_id,
-                entry.query,
-                entry.variables,
-                entry.subgraph,
-            );
+            add_entry(&mut gql_queries, &entry);
         } else if print_extra {
             eprintln!("not a query: {}", line);
         }
