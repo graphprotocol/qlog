@@ -38,23 +38,6 @@ lazy_static! {
     )
     .unwrap();
 
-    /// The regexp we use to extract data about SQL queries from the log files.
-    /// This will only match lines that were emitted during GraphQL execution
-    /// since it looks for `query_id` and `subgraph_id`; it will intentionally
-    /// not match the lines emitted by things like `store.get` which don't
-    /// have those two fields
-    static ref SQL_QUERY_RE: Regex = Regex::new(
-        " Query timing \\(SQL\\), \
-          entity_count: [0-9]+, \
-          time_ms: (?P<time>[0-9]+), \
-          query: (?P<query>.*) -- \
-          binds: (?P<binds>.*), \
-          query_id: (?P<qid>[0-9a-f-]+), \
-          subgraph_id: (?P<sid>[a-zA-Z0-9]*), \
-          component: "
-    )
-    .unwrap();
-
     /// The regexp for finding arguments in GraphQL queries. This intentionally
     /// doesn't cover all possible GraphQL values, only numbers and strings
     static ref VAR_RE: Regex =
@@ -281,14 +264,12 @@ fn add_entry(
 fn process(
     sampler: &mut Sampler,
     print_extra: bool,
-) -> Result<(Vec<QueryInfo>, Vec<QueryInfo>), std::io::Error> {
+) -> Result<Vec<QueryInfo>, std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
-    let mut sql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
 
     let start = Instant::now();
     let mut gql_lines: usize = 0;
-    let mut sql_lines: usize = 0;
     let mut mtch = Duration::from_secs(0);
     for line in io::stdin().lock().lines() {
         let line = line?;
@@ -324,47 +305,18 @@ fn process(
                     subgraph,
                 );
             }
-        } else if let Some(caps) = SQL_QUERY_RE.captures(&line) {
-            mtch += mtch_start.elapsed();
-            sql_lines += 1;
-            if let (Some(time), Some(complexity), Some(query), Some(binds), Some(qid), Some(sid)) = (
-                field(&caps, "time"),
-                field(&caps, "complexity"),
-                field(&caps, "query"),
-                field(&caps, "binds"),
-                field(&caps, "qid"),
-                field(&caps, "sid"),
-            ) {
-                let time: u64 = time.parse().unwrap_or_else(|_| {
-                    eprintln!("invalid query_time: {}", line);
-                    0
-                });
-                add_entry(
-                    &mut sql_queries,
-                    time,
-                    complexity.parse::<u64>().unwrap(),
-                    qid,
-                    query,
-                    Some(binds),
-                    false,
-                    sid,
-                );
-            }
         } else if print_extra {
             eprintln!("not a query: {}", line);
         }
     }
     eprintln!(
-        "Processed {} GraphQL and {} SQL queries in {:.3}s (regexp match: {:.3}s)",
+        "Processed {} GraphQL queries in {:.3}s (regexp match: {:.3}s)",
         gql_lines,
-        sql_lines,
         start.elapsed().as_secs_f64(),
         mtch.as_secs_f64(),
     );
-    Ok((
-        gql_queries.values().cloned().collect(),
-        sql_queries.values().cloned().collect(),
-    ))
+    Ok(        gql_queries.values().cloned().collect(),
+    )
 }
 
 /// Read a list of summaries from `filename` The file must be in
@@ -564,7 +516,6 @@ fn main() {
                 .args_from_usage(
                     "-v, --verbose  'Print which files are being read on stderr'
                     graphql -g, --graphql=<FILE> 'Write GraphQL summary to this file'
-                    [sql] -s, --sql=<FILE> 'Write SQL summary to this file'
                     <dir> 'The directory containing StackDriver files'",
                 ),
         )
@@ -574,7 +525,6 @@ fn main() {
                 .args_from_usage(
                     "-e, --extra 'Print lines that are not recognized as queries on stderr'
                      [graphql] -g, --graphql=<FILE> Write GraphQL summary to this file
-                     [sql] -s, --sql=<FILE> Write SQL summary to this file
                      [samples] --samples=<NUMBER> 'Number of samples to take'
                      [sample-file] --sample-file=<FILE> 'Where to write samples'
                      [sample-subgraphs] --sample-subgraphs=<LIST> 'Which subgraphs to sample'",
@@ -615,14 +565,12 @@ fn main() {
             let dir = args.value_of("dir").expect("'dir' is mandatory");
             let verbose = args.is_present("verbose");
             let mut gql = writer_for(args, "graphql");
-            let mut sql = writer_for(args, "sql");
-            extract::run(dir, &mut gql, &mut sql, verbose)
+            extract::run(dir, &mut gql, verbose)
                 .unwrap_or_else(|err| die(&format!("extract: {}", err.to_string())));
         }
         ("process", Some(args)) => {
             let extra = args.is_present("extra");
             let mut gql = writer_for(args, "graphql");
-            let mut sql = writer_for(args, "sql");
 
             let samples = args
                 .value_of("samples")
@@ -654,7 +602,7 @@ fn main() {
                 }
             }
             let mut sampler = Sampler::new(samples, samples_subgraphs);
-            let (gql_infos, sql_infos) = process(&mut sampler, extra).unwrap_or_else(|err| {
+            let gql_infos = process(&mut sampler, extra).unwrap_or_else(|err| {
                 die(&format!(
                     "process: failed to parse logfile: {}",
                     err.to_string()
@@ -663,12 +611,6 @@ fn main() {
             write_summaries(&mut gql, gql_infos).unwrap_or_else(|err| {
                 die(&format!(
                     "process: failed to write GraphQL logfile: {}",
-                    err.to_string()
-                ))
-            });
-            write_summaries(&mut sql, sql_infos).unwrap_or_else(|err| {
-                die(&format!(
-                    "process: failed to write SQL logfile: {}",
                     err.to_string()
                 ))
             });
@@ -939,33 +881,5 @@ mod tests {
         assert_eq!(Some("true"), field(&caps, "cached"));
         assert_eq!(Some("Qmsubgraph"), field(&caps, "sid"));
         assert_eq!(Some("0"), field(&caps, "complexity"));
-    }
-
-    #[test]
-    fn test_sql_query_re() {
-        const LINE1:&str = "Jan 22 11:22:33.573 TRCE Query timing (SQL), \
-        entity_count: 7, \
-        time_ms: 6, \
-        query: select 'Beneficiary' as entity, to_jsonb(c.*) as data   from \"sgd1\".\"beneficiary\" c  where c.\"block_range\" @> $1 order by \"id\"  limit 100 \
-        -- binds: [2147483647], \
-        query_id: 1d8bc664-41dd-4cf2-8ad6-997e459b322f, \
-        subgraph_id: QmZawMfSrDUr1rYAW9b5rSckGoRCw8tN77WXFbLNEKXPGz, \
-        component: GraphQlRunner";
-
-        let caps = SQL_QUERY_RE.captures(LINE1).unwrap();
-
-        assert_eq!(Some("6"), field(&caps, "time"));
-        let query = field(&caps, "query").unwrap();
-        assert!(query.starts_with("select 'Beneficiary' as entity"));
-        assert!(query.ends_with("limit 100"));
-        assert_eq!(Some("[2147483647]"), field(&caps, "binds"));
-        assert_eq!(
-            Some("1d8bc664-41dd-4cf2-8ad6-997e459b322f"),
-            field(&caps, "qid")
-        );
-        assert_eq!(
-            Some("QmZawMfSrDUr1rYAW9b5rSckGoRCw8tN77WXFbLNEKXPGz"),
-            field(&caps, "sid")
-        );
     }
 }

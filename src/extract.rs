@@ -4,12 +4,11 @@ use std::fs::File;
 use std::io::{self, BufRead, BufReader, Read, Write};
 use walkdir::WalkDir;
 
-use crate::common::{GQL_MARKER, SQL_MARKER, TRIMMED};
+use crate::common::{GQL_MARKER, TRIMMED};
 
 fn extract<T: Read>(
     source: T,
     gql: &mut dyn Write,
-    sql: &mut dyn Write,
 ) -> Result<(usize, usize), std::io::Error> {
     let mut count: usize = 0;
     let mut trimmed_count: usize = 0;
@@ -26,8 +25,6 @@ fn extract<T: Read>(
                 let res = if text.contains(TRIMMED) {
                     trimmed_count += 1;
                     Ok(0)
-                } else if text.contains(SQL_MARKER) {
-                    sql.write(text.as_bytes())
                 } else if text.contains(GQL_MARKER) {
                     gql.write(text.as_bytes())
                 } else {
@@ -52,7 +49,6 @@ fn extract<T: Read>(
 pub fn run(
     dir: &str,
     gql: &mut dyn Write,
-    sql: &mut dyn Write,
     verbose: bool,
 ) -> Result<(), std::io::Error> {
     let json_ext = OsStr::new("json");
@@ -61,7 +57,7 @@ pub fn run(
 
     if dir == "-" {
         let stdin = io::stdin();
-        let (cur_count, cur_trimmed_count) = extract(stdin, gql, sql)?;
+        let (cur_count, cur_trimmed_count) = extract(stdin, gql)?;
         count += cur_count;
         trimmed_count += cur_trimmed_count;
     } else {
@@ -74,7 +70,7 @@ pub fn run(
                 }
                 let file = File::open(entry.path())?;
 
-                let (cur_count, cur_trimmed_count) = extract(file, gql, sql)?;
+                let (cur_count, cur_trimmed_count) = extract(file, gql)?;
                 count += cur_count;
                 trimmed_count += cur_trimmed_count;
             }
