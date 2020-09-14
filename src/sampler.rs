@@ -80,15 +80,17 @@ pub struct Sampler {
     rng: SmallRng,
     samples: BTreeMap<String, SampleDomain>,
     subgraphs: HashSet<String>,
+    out: BufWriter<File>,
 }
 
 impl Sampler {
-    pub fn new(size: usize, subgraphs: HashSet<String>) -> Self {
+    pub fn new(size: usize, subgraphs: HashSet<String>, out: BufWriter<File>) -> Self {
         Sampler {
             size,
             rng: SmallRng::from_entropy(),
             samples: BTreeMap::new(),
             subgraphs,
+            out,
         }
     }
 
@@ -111,7 +113,10 @@ impl Sampler {
         domain.sample(self.size, &mut self.rng, query, variables);
     }
 
-    pub fn write(&self, mut out: BufWriter<File>) -> Result<(), std::io::Error> {
+    pub fn write(&mut self) -> Result<(), std::io::Error> {
+        if self.size <= 0 {
+            return Ok(());
+        }
         #[derive(Serialize)]
         struct SampleOutput<'a> {
             subgraph: &'a String,
@@ -125,7 +130,7 @@ impl Sampler {
                     query: &sample.query,
                     variables: &sample.variables,
                 };
-                writeln!(out, "{}", serde_json::to_string(&v)?)?;
+                writeln!(self.out, "{}", serde_json::to_string(&v)?)?;
             }
         }
         Ok(())

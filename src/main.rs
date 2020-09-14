@@ -392,6 +392,39 @@ fn print_queries(filename: &str, queries: Vec<&str>) -> Result<(), std::io::Erro
     Ok(())
 }
 
+fn make_sampler(args: &ArgMatches) -> Sampler {
+    let samples = args
+        .value_of("samples")
+        .map(|s| s.parse::<usize>().expect("'samples' is a number"))
+        .unwrap_or(0);
+    let samples_file = args
+        .value_of("sample-file")
+        .unwrap_or("/var/tmp/samples.jsonl");
+    let samples_subgraphs = args
+        .value_of("sample-subgraphs")
+        .map(|s| {
+            s.split(",")
+                .map(|t| t.to_owned())
+                .collect::<HashSet<String>>()
+        })
+        .unwrap_or(HashSet::new());
+    if samples > 0 {
+        println!(
+            "Taking {} samples and writing them to {}",
+            samples, samples_file
+        );
+        if samples_subgraphs.is_empty() {
+            println!("  sampling all subgraphs");
+        } else {
+            println!("  sampling these subgraphs");
+            for subgraph in &samples_subgraphs {
+                println!("    {}", subgraph);
+            }
+        }
+    }
+    Sampler::new(samples, samples_subgraphs, buf_writer(samples_file))
+}
+
 fn main() {
     let args = App::new("qlog")
         .version("1.0")
@@ -459,37 +492,8 @@ fn main() {
         ("process", Some(args)) => {
             let extra = args.is_present("extra");
             let mut gql = writer_for(args, "graphql");
+            let mut sampler = make_sampler(args);
 
-            let samples = args
-                .value_of("samples")
-                .map(|s| s.parse::<usize>().expect("'samples' is a number"))
-                .unwrap_or(0);
-            let samples_file = args
-                .value_of("sample-file")
-                .unwrap_or("/var/tmp/samples.jsonl");
-            let samples_subgraphs = args
-                .value_of("sample-subgraphs")
-                .map(|s| {
-                    s.split(",")
-                        .map(|t| t.to_owned())
-                        .collect::<HashSet<String>>()
-                })
-                .unwrap_or(HashSet::new());
-            if samples > 0 {
-                println!(
-                    "Taking {} samples and writing them to {}",
-                    samples, samples_file
-                );
-                if samples_subgraphs.is_empty() {
-                    println!("  sampling all subgraphs");
-                } else {
-                    println!("  sampling these subgraphs");
-                    for subgraph in &samples_subgraphs {
-                        println!("    {}", subgraph);
-                    }
-                }
-            }
-            let mut sampler = Sampler::new(samples, samples_subgraphs);
             let gql_infos = process(&mut sampler, extra).unwrap_or_else(|err| {
                 die(&format!(
                     "process: failed to parse logfile: {}",
@@ -502,17 +506,12 @@ fn main() {
                     err.to_string()
                 ))
             });
-            if samples > 0 {
-                sampler
-                    .write(buf_writer(samples_file))
-                    .unwrap_or_else(|err| {
-                        die(&format!(
-                            "process: failed to write samples to {}: {}",
-                            samples_file,
-                            err.to_string()
-                        ))
-                    });
-            }
+            sampler.write().unwrap_or_else(|err| {
+                die(&format!(
+                    "process: failed to write samples: {}",
+                    err.to_string()
+                ))
+            });
         }
         ("stats", args) => {
             let args = args.expect("arguments are mandatory for this command");
