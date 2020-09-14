@@ -27,7 +27,7 @@ lazy_static! {
     static ref GQL_QUERY_RE: Regex = Regex::new(
         " Query timing \\(GraphQL\\), \
           (?:complexity: (?P<complexity>[0-9]+), )?\
-          (?:block: (?P<block>[0-9]+), )?\
+          block: (?P<block>[0-9]+), \
           (cached: (?P<cached>[a-zA-Z0-9_-]+), )?\
          query_time_ms: (?P<time>[0-9]+), \
         (?:variables: (?P<vars>\\{.*\\}|null), )?\
@@ -721,12 +721,14 @@ mod tests {
     #[test]
     fn test_gql_query_re() {
         const LINE1: &str = "Dec 30 20:55:13.071 INFO Query timing (GraphQL), \
+                             block: 10344025, \
                              query_time_ms: 160, \
                              query: query Stuff { things } , \
                              query_id: f-1-4-b-e4, \
                              subgraph_id: QmSuBgRaPh, \
                              component: GraphQlRunner\n";
         const LINE2: &str = "Dec 31 23:59:59.667 INFO Query timing (GraphQL), \
+                             block: 10344025, \
                              query_time_ms: 125, \
                              variables: {}, \
                              query: query { things(id:\"1\") { id }} , \
@@ -734,6 +736,7 @@ mod tests {
                              subgraph_id: QmSuBgRaPh, \
                              component: GraphQlRunner";
         const LINE3: &str = "Dec 31 23:59:59.739 INFO Query timing (GraphQL), \
+                             block: 10344025, \
                              query_time_ms: 14, \
                              variables: null, \
                              query: query TranscoderQuery { transcoders(first: 1) { id } } , \
@@ -741,6 +744,7 @@ mod tests {
                              subgraph_id: QmeYBGccAwahY, \
                              component: GraphQlRunner";
         const LINE4: &str = "Dec 31 23:59:59.846 INFO Query timing (GraphQL), \
+             block: 10344025, \
              query_time_ms: 12, \
              variables: {\"id\":\"0xdeadbeef\"}, \
              query: query exchange($id: String!) { exchange(id: $id) { id tokenAddress } } , \
@@ -748,7 +752,7 @@ mod tests {
              subgraph_id: QmSuBgRaPh, \
              component: GraphQlRunner";
 
-        const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
+        const LINE5: &str = "Dec 31 22:59:58.863 INFO Query timing (GraphQL), block: 1234, query_time_ms: 2657, variables: {\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}, query: query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename } , query_id: 2d-12-4b-a8-6b, subgraph_id: QmSuBgRaPh, component: GraphQlRunner";
 
         const LINE6: &str = "Jun 26 22:12:02.295 INFO Query timing (GraphQL), \
                              complexity: 4711, \
@@ -789,7 +793,7 @@ mod tests {
 
         let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
         assert_eq!(None, field(&caps, "complexity"));
-        assert_eq!(None, field(&caps, "block"));
+        assert_eq!(Some("10344025"), field(&caps, "block"));
         assert_eq!(Some("125"), field(&caps, "time"));
         assert_eq!(
             Some("query { things(id:\"1\") { id }}"),
