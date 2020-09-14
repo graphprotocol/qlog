@@ -6,10 +6,7 @@ use walkdir::WalkDir;
 
 use crate::common::{GQL_MARKER, TRIMMED};
 
-fn extract<T: Read>(
-    source: T,
-    gql: &mut dyn Write,
-) -> Result<(usize, usize), std::io::Error> {
+fn extract<T: Read>(source: T, gql: &mut dyn Write) -> Result<(usize, usize), std::io::Error> {
     let mut count: usize = 0;
     let mut trimmed_count: usize = 0;
     let mut stderr = io::stderr();
@@ -46,11 +43,7 @@ fn extract<T: Read>(
 
 /// The 'extract' subcommand turning a StackDriver logfile into a plain
 /// textual logfile by pulling out the 'textPayload' for each entry
-pub fn run(
-    dir: &str,
-    gql: &mut dyn Write,
-    verbose: bool,
-) -> Result<(), std::io::Error> {
+pub fn run(dir: &str, gql: &mut dyn Write, verbose: bool) -> Result<(), std::io::Error> {
     let json_ext = OsStr::new("json");
     let mut trimmed_count: usize = 0;
     let mut count: usize = 0;

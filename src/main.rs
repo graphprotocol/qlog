@@ -29,7 +29,7 @@ lazy_static! {
           (?:complexity: (?P<complexity>[0-9]+), )?\
           block: (?P<block>[0-9]+), \
          query_time_ms: (?P<time>[0-9]+), \
-        (?:variables: (?P<vars>\\{.*\\}|null), )?\
+         variables: (?P<vars>\\{.*\\}|null), \
          query: (?P<query>.*) , \
          query_id: (?P<qid>[0-9a-f-]+), \
          subgraph_id: (?P<sid>[a-zA-Z0-9]*), \
@@ -70,7 +70,7 @@ struct QueryInfo {
     /// in the logfile
     max_uuid: String,
     /// The variables used in the slowest query
-    max_variables: Option<String>,
+    max_variables: String,
     /// The complexity of the slowest query
     #[serde(default = "zero")]
     max_complexity: u64,
@@ -100,7 +100,7 @@ impl QueryInfo {
             time_squared: 0,
             max_time: 0,
             max_uuid: "(none)".to_owned(),
-            max_variables: None,
+            max_variables: "null".to_owned(),
             max_complexity: 0,
             slow_count: 0,
             calls: 0,
@@ -108,28 +108,20 @@ impl QueryInfo {
         }
     }
 
-    fn add(
-        &mut self,
-        time: u64,
-        query_id: &str,
-        query: &str,
-        variables: Option<&str>,
-        complexity: u64,
-    ) {
-
-            self.calls += 1;
-            self.total_time += time;
-            self.time_squared += time * time;
-            if time > self.max_time {
-                self.max_time = time;
-                self.max_uuid = query_id.to_owned();
-                self.max_variables = variables.map(|vars| vars.to_owned());
-                self.max_complexity = complexity;
-                self.query = query.to_owned();
-            }
-            if time > SLOW_THRESHOLD {
-                self.slow_count += 1;
-            }
+    fn add(&mut self, time: u64, query_id: &str, query: &str, variables: &str, complexity: u64) {
+        self.calls += 1;
+        self.total_time += time;
+        self.time_squared += time * time;
+        if time > self.max_time {
+            self.max_time = time;
+            self.max_uuid = query_id.to_owned();
+            self.max_variables = variables.to_owned();
+            self.max_complexity = complexity;
+            self.query = query.to_owned();
+        }
+        if time > SLOW_THRESHOLD {
+            self.slow_count += 1;
+        }
     }
 
     fn avg(&self) -> f64 {
@@ -216,7 +208,7 @@ fn add_entry(
     complexity: u64,
     query_id: &str,
     query: &str,
-    variables: Option<&str>,
+    variables: &str,
     subgraph: &str,
 ) {
     let hsh = QueryInfo::hash(query_id, &query, &subgraph);
@@ -229,10 +221,7 @@ fn add_entry(
 
 /// The heart of the `process` subcommand. Expects a logfile containing
 /// query logs on the command line.
-fn process(
-    sampler: &mut Sampler,
-    print_extra: bool,
-) -> Result<Vec<QueryInfo>, std::io::Error> {
+fn process(sampler: &mut Sampler, print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
 
@@ -253,7 +242,7 @@ fn process(
                 field(&caps, "sid"),
             ) {
                 let complexity = field(&caps, "complexity").unwrap_or("0");
-                let variables = field(&caps, "vars");
+                let variables = field(&caps, "vars").unwrap_or("null");
                 let query_time: u64 = query_time.parse().unwrap_or_else(|_| {
                     eprintln!("invalid query_time: {}", line);
                     0
@@ -279,8 +268,7 @@ fn process(
         start.elapsed().as_secs_f64(),
         mtch.as_secs_f64(),
     );
-    Ok(        gql_queries.values().cloned().collect(),
-    )
+    Ok(gql_queries.values().cloned().collect())
 }
 
 /// Read a list of summaries from `filename` The file must be in
@@ -431,9 +419,7 @@ fn print_full_query(info: &QueryInfo) {
         writeln!(stdout, "# stddev_time:     {:>12.0} ms", info.stddev());
         writeln!(stdout, "# max_time:        {:>12} ms", info.max_time);
         writeln!(stdout, "# max_uuid:      {}", info.max_uuid);
-        if let Some(max_vars) = &info.max_variables {
-            writeln!(stdout, "# max_variables: {}", max_vars);
-        }
+        writeln!(stdout, "# max_variables: {}", info.max_variables);
         writeln!(stdout, "\n{}", info.query);
     }
 }
@@ -674,6 +660,7 @@ mod tests {
         const LINE1: &str = "Dec 30 20:55:13.071 INFO Query timing (GraphQL), \
                              block: 10344025, \
                              query_time_ms: 160, \
+                             variables: null, \
                              query: query Stuff { things } , \
                              query_id: f-1-4-b-e4, \
                              subgraph_id: QmSuBgRaPh, \
@@ -736,7 +723,7 @@ mod tests {
         assert_eq!(Some("query Stuff { things }"), field(&caps, "query"));
         assert_eq!(Some("f-1-4-b-e4"), field(&caps, "qid"));
         assert_eq!(Some("QmSuBgRaPh"), field(&caps, "sid"));
-        assert_eq!(None, field(&caps, "vars"));
+        assert_eq!(Some("null"), field(&caps, "vars"));
 
         let caps = GQL_QUERY_RE.captures(LINE2).unwrap();
         assert_eq!(None, field(&caps, "complexity"));

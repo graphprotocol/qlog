@@ -10,21 +10,14 @@ use crate::common::{INDEX_NODE_SUBGRAPH, SUBGRAPHS_SUBGRAPH};
 
 struct Sample {
     query: String,
-    variables: Option<String>,
+    variables: String,
 }
 
 impl Sample {
-    fn new(query: &str, variables: &Option<&str>) -> Self {
-        let vars = variables.and_then(|vars| {
-            if vars.is_empty() || vars == "{}" || vars == "null" {
-                None
-            } else {
-                Some(vars.to_owned())
-            }
-        });
+    fn new(query: &str, variables: &str) -> Self {
         Sample {
             query: query.to_owned(),
-            variables: vars,
+            variables: variables.to_owned(),
         }
     }
 }
@@ -53,7 +46,7 @@ impl SampleDomain {
     /// If we have not seen `(query, variables)` before, add them to our samples
     /// so that in the end the probability that any unique query is in our
     /// final sample is `size / N` where `N` is the number of distinct queries
-    fn sample(&mut self, size: usize, rng: &mut SmallRng, query: &str, variables: &Option<&str>) {
+    fn sample(&mut self, size: usize, rng: &mut SmallRng, query: &str, variables: &str) {
         let hash = {
             let mut hasher = DefaultHasher::new();
             (query, variables).hash(&mut hasher);
@@ -99,7 +92,7 @@ impl Sampler {
         }
     }
 
-    pub fn sample<'b>(&mut self, query: &str, variables: &Option<&str>, subgraph: &'b str) {
+    pub fn sample<'b>(&mut self, query: &str, variables: &str, subgraph: &'b str) {
         if self.size == 0
             || subgraph == INDEX_NODE_SUBGRAPH
             || subgraph == SUBGRAPHS_SUBGRAPH
@@ -123,8 +116,7 @@ impl Sampler {
         struct SampleOutput<'a> {
             subgraph: &'a String,
             query: &'a String,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            variables: &'a Option<String>,
+            variables: &'a String,
         }
         for (subgraph, domain) in &self.samples {
             for sample in &domain.samples {
