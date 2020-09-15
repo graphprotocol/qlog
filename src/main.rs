@@ -441,6 +441,7 @@ fn main() {
                 .args_from_usage(
                     "-v, --verbose  'Print which files are being read on stderr'
                     graphql -g, --graphql=<FILE> 'Write GraphQL summary to this file'
+                    -t, --text 'Write plain text instead of JSONL'
                     <dir> 'The directory containing StackDriver files'",
                 ),
         )
@@ -490,9 +491,16 @@ fn main() {
         ("extract", Some(args)) => {
             let dir = args.value_of("dir").expect("'dir' is mandatory");
             let verbose = args.is_present("verbose");
-            let mut gql = writer_for(args, "graphql");
-            extract::run(dir, &mut gql, verbose)
-                .unwrap_or_else(|err| die(&format!("extract: {}", err.to_string())));
+            let text = args.is_present("text");
+            let out = writer_for(args, "graphql");
+            let result = if text {
+                let mut out = extract::TextWriter::new(out);
+                extract::run(dir, &mut out, verbose)
+            } else {
+                let mut out = extract::JsonlWriter::new(out, verbose);
+                extract::run(dir, &mut out, verbose)
+            };
+            result.unwrap_or_else(|err| die(&format!("extract: {}", err.to_string())));
         }
         ("process", Some(args)) => {
             let extra = args.is_present("extra");

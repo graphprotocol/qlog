@@ -1,7 +1,7 @@
 //! Representation of a single log entry
-use serde::Deserialize;
+use serde::{Serialize,Deserialize};
 
-#[derive(Debug, PartialEq, Eq, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry<'a> {
     pub subgraph: &'a str,
     pub query_id: &'a str,
