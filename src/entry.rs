@@ -1,24 +1,26 @@
 //! Representation of a single log entry
 use serde::{Serialize,Deserialize};
+use std::borrow::Cow;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry<'a> {
-    pub subgraph: &'a str,
-    pub query_id: &'a str,
+    pub subgraph: Cow<'a, str>,
+    pub query_id: Cow<'a, str>,
     pub block: u64,
     pub time: u64,
-    pub query: &'a str,
-    pub variables: &'a str,
-    pub timestamp: Option<&'a str>,
+    pub query: Cow<'a, str>,
+    pub variables: Cow<'a, str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timestamp: Option<Cow<'a, str>>,
 }
 
 // Return the part of the line between `prefix` and `suffix`, with
 // both of them not appearing in the result
-fn field<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+fn field<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<Cow<'a, str>> {
     if let Some(start) = line.find(prefix) {
         if let Some(field) = line.get(start + prefix.len()..) {
             if let Some(end) = field.find(suffix) {
-                return field.get(..end);
+                return field.get(..end).map(|s| Cow::from(s));
             }
         }
     }
@@ -26,11 +28,11 @@ fn field<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
 }
 
 // Same as `field`, but we search for `suffix` from the right
-fn rfield<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<&'a str> {
+fn rfield<'a>(line: &'a str, prefix: &str, suffix: &str) -> Option<Cow<'a, str>> {
     if let Some(start) = line.find(prefix) {
         if let Some(field) = line.get(start + prefix.len()..) {
             if let Some(end) = field.rfind(suffix) {
-                return field.get(..end);
+                return field.get(..end).map(|s| Cow::from(s));
             }
         }
     }
@@ -69,6 +71,7 @@ impl<'a> Entry<'a> {
                 eprintln!("invalid query_time: {}", line);
                 0
             });
+            let timestamp = timestamp.map(|ts| Cow::from(ts));
 
             let entry = Entry {
                 subgraph,
@@ -185,72 +188,72 @@ mod tests {
                              subgraph_id: QmaSubgraph, component: GraphQlRunner";
 
         let exp = Entry {
-            subgraph: "QmSuBgRaPh",
+            subgraph: "QmSuBgRaPh".into(),
             block: 10344025,
             time: 160,
-            query: "query Stuff { things }",
-            variables: "null",
-            query_id: "f-1-4-b-e4",
+            query: "query Stuff { things }".into(),
+            variables: "null".into(),
+            query_id: "f-1-4-b-e4".into(),
             timestamp: None,
         };
         let entry = Entry::parse(LINE1, None);
         assert_eq!(Some(exp), entry);
 
         let exp = Entry {
-            subgraph: "QmSuBgRaPh",
+            subgraph: "QmSuBgRaPh".into(),
             block: 10344025,
             time: 125,
-            query: "query { things(id:\"1\") { id }}",
-            variables: "{}",
-            query_id: "f2-6b-48-b6-6b",
+            query: "query { things(id:\"1\") { id }}".into(),
+            variables: "{}".into(),
+            query_id: "f2-6b-48-b6-6b".into(),
             timestamp: None,
         };
         let entry = Entry::parse(LINE2, None);
         assert_eq!(Some(exp), entry);
 
         let exp = Entry {
-            subgraph: "QmeYBGccAwahY",
+            subgraph: "QmeYBGccAwahY".into(),
             block: 10344025,
             time: 14,
-            query: "query TranscoderQuery { transcoders(first: 1) { id } }",
-            variables: "null",
-            query_id: "c5-d3-4e-92-37",
+            query: "query TranscoderQuery { transcoders(first: 1) { id } }".into(),
+            variables: "null".into(),
+            query_id: "c5-d3-4e-92-37".into(),
             timestamp: None,
         };
         let entry = Entry::parse(LINE3, None);
         assert_eq!(Some(exp), entry);
 
         let exp = Entry {
-            subgraph: "QmSuBgRaPh",
+            subgraph: "QmSuBgRaPh".into(),
             block: 10344025,
             time: 12,
-            query: "query exchange($id: String!) { exchange(id: $id) { id tokenAddress } }",
-            variables: "{\"id\":\"0xdeadbeef\"}",
-            query_id: "c8-1c-4c-98-65",
+            query: "query exchange($id: String!) { exchange(id: $id) { id tokenAddress } }".into(),
+            variables: "{\"id\":\"0xdeadbeef\"}".into(),
+            query_id: "c8-1c-4c-98-65".into(),
             timestamp: None,
         };
         let entry = Entry::parse(LINE4, None);
         assert_eq!(Some(exp), entry);
 
         let exp = Entry {
-            subgraph: "QmSuBgRaPh",
+            subgraph: "QmSuBgRaPh".into(),
             block: 1234,
             time: 2657,
-            query: "query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename }",
-            variables: "{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}",
-            query_id: "2d-12-4b-a8-6b",
+            query: "query TranscodersQuery($_v0_skip: Int, $_v1_first: Int, $_v2_where: Transcoder_filter) { transcoders(where: $_v2_where, skip: $_v0_skip, first: $_v1_first) { ...TranscoderFragment __typename } }  fragment TranscoderFragment on Transcoder { id active status lastRewardRound { id __typename } rewardCut feeShare pricePerSegment pendingRewardCut pendingFeeShare pendingPricePerSegment totalStake pools(orderBy: id, orderDirection: desc) { rewardTokens round { id __typename } __typename } __typename }".into(),
+            variables: "{\"_v1_first\":100,\"_v2_where\":{\"status\":\"Registered\"},\"_v0_skip\":0}".into(),
+            query_id: "2d-12-4b-a8-6b".into(),
             timestamp: None
         };
         let entry = Entry::parse(LINE5, None);
         assert_eq!(Some(exp), entry);
 
         let exp = Entry {
-            subgraph: "QmaSubgraph",
+            subgraph: "QmaSubgraph".into(),
             block: 10344025,
             time: 10,
-            query: "{ rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } }",
-            variables: "null",
-            query_id: "cb9af68f-ae60-4dba-b9b3-89aee6fe8eca",
+            query: "{ rateUpdates(orderBy: timestamp, orderDirection: desc, where: {synth: \"sEUR\", timestamp_gte: 1593123133, timestamp_lte: 1593209533}, first: 1000, skip: 0) { id synth rate block timestamp } }".into(),
+            variables: "null".into(),
+            query_id: "cb9af68f-ae60-4dba-b9b3-89aee6fe8eca".into(),
             timestamp: None
         };
         let entry = Entry::parse(LINE6, None);

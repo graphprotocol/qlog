@@ -88,9 +88,9 @@ impl QueryInfo {
         self.time_squared += entry.time * entry.time;
         if entry.time > self.max_time {
             self.max_time = entry.time;
-            self.max_uuid = entry.query_id.to_owned();
-            self.max_variables = entry.variables.to_owned();
-            self.query = entry.query.to_owned();
+            self.max_uuid = entry.query_id.to_string();
+            self.max_variables = entry.variables.to_string();
+            self.query = entry.query.to_string();
         }
         if entry.time > SLOW_THRESHOLD {
             self.slow_count += 1;
@@ -176,8 +176,8 @@ fn add_entry(queries: &mut BTreeMap<u64, QueryInfo>, entry: &Entry) {
     let count = queries.len();
     let info = queries.entry(hsh).or_insert_with(|| {
         QueryInfo::new(
-            entry.query.to_owned(),
-            entry.subgraph.to_owned(),
+            entry.query.to_string(),
+            entry.subgraph.to_string(),
             count + 1,
             hsh,
         )
