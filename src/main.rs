@@ -14,7 +14,7 @@ mod extract;
 mod sampler;
 mod shape_hash;
 
-use entry::Entry;
+use entry::{Entry, EntryParser, TextEntryParser, JsonlEntryParser};
 use sampler::Sampler;
 
 /// Queries that take longer than this (in ms) are considered slow
@@ -187,7 +187,11 @@ fn add_entry(queries: &mut BTreeMap<u64, QueryInfo>, entry: &Entry) {
 
 /// The heart of the `process` subcommand. Expects a logfile containing
 /// query logs on the command line.
-fn process(sampler: &mut Sampler, print_extra: bool) -> Result<Vec<QueryInfo>, std::io::Error> {
+fn process(
+    sampler: &mut Sampler,
+    parser: &dyn EntryParser,
+    print_extra: bool,
+) -> Result<Vec<QueryInfo>, std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
 
@@ -198,7 +202,7 @@ fn process(sampler: &mut Sampler, print_extra: bool) -> Result<Vec<QueryInfo>, s
         let line = line?;
 
         let mtch_start = Instant::now();
-        if let Some(entry) = Entry::parse(&line, None) {
+        if let Some(entry) = parser.parse(&line) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
             sampler.sample(&entry.query, &entry.variables, &entry.subgraph);
@@ -445,6 +449,7 @@ fn main() {
                 .about("Process a logfile produced by 'extract' and output a summary")
                 .args_from_usage(
                     "-e, --extra 'Print lines that are not recognized as queries on stderr'
+                     -t, --text 'Input is in plain text format, not jsonl'
                      [graphql] -g, --graphql=<FILE> Write GraphQL summary to this file
                      [samples] --samples=<NUMBER> 'Number of samples to take'
                      [sample-file] --sample-file=<FILE> 'Where to write samples'
@@ -491,10 +496,18 @@ fn main() {
         }
         ("process", Some(args)) => {
             let extra = args.is_present("extra");
+            let text = args.is_present("text");
             let mut gql = writer_for(args, "graphql");
             let mut sampler = make_sampler(args);
 
-            let gql_infos = process(&mut sampler, extra).unwrap_or_else(|err| {
+            let result = if text {
+                let parser = TextEntryParser {};
+                process(&mut sampler, &parser, extra)
+            } else {
+                let parser = JsonlEntryParser {};
+                process(&mut sampler, &parser, extra)
+            };
+            let gql_infos = result.unwrap_or_else(|err| {
                 die(&format!(
                     "process: failed to parse logfile: {}",
                     err.to_string()

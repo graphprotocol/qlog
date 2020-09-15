@@ -1,6 +1,7 @@
 //! Representation of a single log entry
+use serde::Deserialize;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Deserialize)]
 pub struct Entry<'a> {
     pub subgraph: &'a str,
     pub query_id: &'a str,
@@ -82,6 +83,26 @@ impl<'a> Entry<'a> {
         } else {
             None
         }
+    }
+}
+
+pub trait EntryParser {
+    fn parse<'a>(&self, line: &'a str) -> Option<Entry<'a>>;
+}
+
+pub struct TextEntryParser {}
+
+impl EntryParser for TextEntryParser {
+    fn parse<'a>(&self, line: &'a str) -> Option<Entry<'a>> {
+        Entry::parse(line, None)
+    }
+}
+
+pub struct JsonlEntryParser {}
+
+impl EntryParser for JsonlEntryParser {
+    fn parse<'a>(&self, line: &'a str) -> Option<Entry<'a>> {
+        serde_json::from_str(line).ok()
     }
 }
 
