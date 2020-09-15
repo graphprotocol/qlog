@@ -1,5 +1,6 @@
 use rand::{prelude::Rng, rngs::SmallRng, SeedableRng};
 use serde::Serialize;
+use std::borrow::Cow;
 use std::collections::hash_map::DefaultHasher;
 use std::collections::{BTreeMap, HashSet};
 use std::fs::File;
@@ -7,17 +8,28 @@ use std::hash::{Hash, Hasher};
 use std::io::{BufWriter, Write};
 
 use crate::common::{INDEX_NODE_SUBGRAPH, SUBGRAPHS_SUBGRAPH};
+use crate::Entry;
 
+#[derive(Serialize)]
 struct Sample {
     query: String,
     variables: String,
+    query_id: String,
+    block: u64,
+    time: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    timestamp: Option<String>,
 }
 
-impl Sample {
-    fn new(query: &str, variables: &str) -> Self {
-        Sample {
-            query: query.to_owned(),
-            variables: variables.to_owned(),
+impl<'a> From<&Entry<'a>> for Sample {
+    fn from(entry: &Entry) -> Self {
+        Self {
+            query: entry.query.to_string(),
+            variables: entry.query.to_string(),
+            query_id: entry.query_id.to_string(),
+            block: entry.block,
+            time: entry.time,
+            timestamp: entry.timestamp.as_ref().map(|s| s.to_string()),
         }
     }
 }
@@ -46,10 +58,10 @@ impl SampleDomain {
     /// If we have not seen `(query, variables)` before, add them to our samples
     /// so that in the end the probability that any unique query is in our
     /// final sample is `size / N` where `N` is the number of distinct queries
-    fn sample(&mut self, size: usize, rng: &mut SmallRng, query: &str, variables: &str) {
+    fn sample(&mut self, size: usize, rng: &mut SmallRng, entry: &Entry) {
         let hash = {
             let mut hasher = DefaultHasher::new();
-            (query, variables).hash(&mut hasher);
+            (&entry.query, &entry.variables).hash(&mut hasher);
             hasher.finish()
         };
 
@@ -59,11 +71,11 @@ impl SampleDomain {
             // subgraph in the file we are processing, the probabilty that any
             // one query winds up in the sample is `size/N`
             if self.seen_count < size {
-                self.samples.push(Sample::new(query, variables));
+                self.samples.push(Sample::from(entry));
             } else {
                 let k = rng.gen_range(0, self.seen_count + 1);
                 if k < size {
-                    let samples = Sample::new(query, variables);
+                    let samples = Sample::from(entry);
                     if let Some(entry) = self.samples.get_mut(k) {
                         *entry = samples;
                     }
@@ -94,43 +106,43 @@ impl Sampler {
         }
     }
 
-    pub fn sample<'b>(&mut self, query: &str, variables: &str, subgraph: &'b str) {
+    pub fn sample<'b>(&mut self, entry: &Entry) {
         if self.size == 0
-            || subgraph == INDEX_NODE_SUBGRAPH
-            || subgraph == SUBGRAPHS_SUBGRAPH
-            || (!self.subgraphs.is_empty() && !self.subgraphs.contains(subgraph))
+            || entry.subgraph == INDEX_NODE_SUBGRAPH
+            || entry.subgraph == SUBGRAPHS_SUBGRAPH
+            || (!self.subgraphs.is_empty() && !self.subgraphs.contains(entry.subgraph.as_ref()))
         {
             return;
         }
 
         let domain = {
-            match self.samples.get_mut(subgraph) {
+            match self.samples.get_mut(entry.subgraph.as_ref()) {
                 Some(samples) => samples,
-                None => self.samples.entry(subgraph.to_owned()).or_default(),
+                None => self.samples.entry(entry.subgraph.to_string()).or_default(),
             }
         };
 
-        domain.sample(self.size, &mut self.rng, query, variables);
+        domain.sample(self.size, &mut self.rng, entry);
     }
 
     pub fn write(&mut self) -> Result<(), std::io::Error> {
         if self.size <= 0 {
             return Ok(());
         }
-        #[derive(Serialize)]
-        struct SampleOutput<'a> {
-            subgraph: &'a String,
-            query: &'a String,
-            variables: &'a String,
-        }
+
         for (subgraph, domain) in &self.samples {
             for sample in &domain.samples {
-                let v = SampleOutput {
+                let subgraph = Cow::from(subgraph);
+                let entry = Entry {
                     subgraph,
-                    query: &sample.query,
-                    variables: &sample.variables,
+                    query_id: Cow::from(&sample.query_id),
+                    block: sample.block,
+                    time: sample.time,
+                    query: Cow::from(&sample.query),
+                    variables: Cow::from(&sample.variables),
+                    timestamp: sample.timestamp.as_ref().map(|s| Cow::from(s)),
                 };
-                writeln!(self.out, "{}", serde_json::to_string(&v)?)?;
+                writeln!(self.out, "{}", serde_json::to_string(&entry)?)?;
             }
         }
         Ok(())

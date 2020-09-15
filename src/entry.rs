@@ -1,5 +1,5 @@
 //! Representation of a single log entry
-use serde::{Serialize,Deserialize};
+use serde::{Deserialize, Serialize};
 use std::borrow::Cow;
 
 #[derive(Debug, PartialEq, Eq, Serialize, Deserialize)]

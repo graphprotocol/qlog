@@ -14,7 +14,7 @@ mod extract;
 mod sampler;
 mod shape_hash;
 
-use entry::{Entry, EntryParser, TextEntryParser, JsonlEntryParser};
+use entry::{Entry, EntryParser, JsonlEntryParser, TextEntryParser};
 use sampler::Sampler;
 
 /// Queries that take longer than this (in ms) are considered slow
@@ -205,7 +205,7 @@ fn process(
         if let Some(entry) = parser.parse(&line) {
             mtch += mtch_start.elapsed();
             gql_lines += 1;
-            sampler.sample(&entry.query, &entry.variables, &entry.subgraph);
+            sampler.sample(&entry);
             add_entry(&mut gql_queries, &entry);
         } else if print_extra {
             eprintln!("not a query: {}", line);
