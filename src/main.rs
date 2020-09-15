@@ -212,7 +212,7 @@ fn process(
         }
     }
     eprintln!(
-        "Processed {} GraphQL queries in {:.3}s (regexp match: {:.3}s)",
+        "Processed {} GraphQL queries in {:.3}s (match: {:.3}s)",
         gql_lines,
         start.elapsed().as_secs_f64(),
         mtch.as_secs_f64(),
