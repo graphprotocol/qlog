@@ -43,7 +43,7 @@ impl<'a> Entry<'a> {
     pub fn parse(line: &'a str, timestamp: Option<&'a str>) -> Option<Entry<'a>> {
         let block = field(line, "block: ", ",");
         let time = field(line, "query_time_ms: ", ",");
-        let subgraph = field(line, "subgraph_id: ", ",");
+        let subgraph = field(line, "subgraph_id: ", ", component: ");
         let query_id = field(line, "query_id: ", ",");
         // This is unambiguous since formatted GraphQL queries do not
         // contain commas surrounded by whitespace. Since we search
