@@ -25,7 +25,7 @@ impl<'a> From<&Entry<'a>> for Sample {
     fn from(entry: &Entry) -> Self {
         Self {
             query: entry.query.to_string(),
-            variables: entry.query.to_string(),
+            variables: entry.variables.to_string(),
             query_id: entry.query_id.to_string(),
             block: entry.block,
             time: entry.time,
