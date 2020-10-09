@@ -191,6 +191,7 @@ fn process(
     sampler: &mut Sampler,
     parser: &dyn EntryParser,
     print_extra: bool,
+    out: &mut Option<BufWriter<File>>
 ) -> Result<Vec<QueryInfo>, std::io::Error> {
     // Read the file line by line using the lines() iterator from std::io::BufRead.
     let mut gql_queries: BTreeMap<u64, QueryInfo> = BTreeMap::default();
@@ -207,6 +208,10 @@ fn process(
             gql_lines += 1;
             sampler.sample(&entry);
             add_entry(&mut gql_queries, &entry);
+            if let Some(ref mut out) = out {
+                let json = serde_json::to_string(&entry)?;
+                writeln!(out, "{}", json)?;
+            }
         } else if print_extra {
             eprintln!("not a query: {}", line);
         }
@@ -451,6 +456,7 @@ fn main() {
                 .args_from_usage(
                     "-e, --extra 'Print lines that are not recognized as queries on stderr'
                      -t, --text 'Input is in plain text format, not jsonl'
+                     -o, --output=<FILE> 'Save input formatted as jsonl in this file'
                      [graphql] -g, --graphql=<FILE> Write GraphQL summary to this file
                      [samples] --samples=<NUMBER> 'Number of samples to take'
                      [sample-file] --sample-file=<FILE> 'Where to write samples'
@@ -507,13 +513,14 @@ fn main() {
             let text = args.is_present("text");
             let mut gql = writer_for(args, "graphql");
             let mut sampler = make_sampler(args);
+            let mut out = args.value_of("output").map(|_| writer_for(args, "output"));
 
             let result = if text {
                 let parser = TextEntryParser {};
-                process(&mut sampler, &parser, extra)
+                process(&mut sampler, &parser, extra, &mut out)
             } else {
                 let parser = JsonlEntryParser {};
-                process(&mut sampler, &parser, extra)
+                process(&mut sampler, &parser, extra, &mut out)
             };
             let gql_infos = result.unwrap_or_else(|err| {
                 die(&format!(
