@@ -1,0 +1,118 @@
+#! /bin/bash
+
+TOPDIR=$(dirname $0)
+
+usage() {
+    echo "load [-c] summary.json ..."
+    echo "Load summary files into the database that running plain 'psql' will connect to"
+    echo "        -c: create the 'qlog' database schema"
+    exit 1
+}
+
+if ! type -p jq > /dev/null
+then
+    echo "you must have 'jq' installed and on your path"
+    exit 1
+fi
+
+if ! type -p psql > /dev/null
+then
+    echo "you must have 'psql' installed and on your path"
+    exit 1
+fi
+
+read -r -d '' create_schema <<"EOF"
+drop schema if exists qlog cascade;
+
+create schema qlog;
+
+create table qlog.data(
+ day date,
+ query text,
+ max_variables text,
+ subgraph text,
+ total_time int8,
+ time_squared int8,
+ max_time int8,
+ max_uuid text,
+ slow_count int8,
+ calls int8,
+ avg numeric,
+ stddev numeric,
+ id int,
+ cached_count int8 default 0,
+ cached_time int8 default 0,
+ cached_max_time int8 default 0
+);
+
+create materialized view qlog.subgraph_usage as
+select subgraph,
+       sum(calls) as calls,
+       sum(cached_count) as cached_count,
+       sum(calls + cached_count) as total_calls,
+       sum(total_time + cached_time) as total_time,
+       max(max_time) as max_time,
+       sum(slow_count) as slow_count
+  from qlog.data
+ group by 1 order by 2 desc;
+
+create materialized view qlog.daily_subgraph_usage as
+select day,
+       subgraph,
+       sum(calls) as calls,
+       sum(cached_count) as cached_count,
+       sum(calls + cached_count) as total_calls,
+       sum(total_time + cached_time) as total_time,
+       max(max_time) as max_time,
+       sum(slow_count) as slow_count
+  from qlog.data
+ group by 1, 2;
+EOF
+
+read -r -d '' calc_stats <<"EOF"
+update qlog.data
+   set avg = total_time::numeric/calls,
+       stddev = sqrt(abs(time_squared::numeric/calls - (total_time::numeric/calls)^2))
+ where avg is null
+   and calls != 0;
+
+update qlog.data
+   set avg = 0,
+       stddev = 0
+ where avg is null
+   and calls = 0;
+
+refresh materialized view qlog.subgraph_usage;
+refresh materialized view qlog.daily_subgraph_usage;
+EOF
+
+set -e
+
+while getopts "c" arg
+do
+    case "$arg" in
+        c) do_create=yes
+           ;;
+        *)
+            usage
+          ;;
+    esac
+done
+shift $((OPTIND-1))
+
+if [ "$do_create" = yes ]
+then
+    psql -X --quiet -c "$create_schema"
+fi
+
+for f in "$@"
+do
+    day=$(basename "$f" .json)
+    echo "$day"
+    psql -X --quiet -c "delete from qlog.data where day='$day'"
+    as_csv=$(printf '["%s", .query, .max_variables, .subgraph, .total_time, .time_squared, .max_time, .max_uuid, .slow_count, .calls, .id] | @csv' "$day")
+    jq -r "$as_csv" < "$f" \
+        | psql -X --quiet -c "COPY qlog.data (day, query, max_variables, subgraph, total_time, time_squared, max_time, max_uuid, slow_count, calls, id) FROM STDIN WITH (FORMAT CSV)"
+done
+
+psql -X --quiet -c "$calc_stats"
