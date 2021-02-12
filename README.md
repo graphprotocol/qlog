@@ -211,3 +211,9 @@ host:qlog> psql -c '
 >  order by 2 desc
 >  limit 5;'
 ```
+
+# Copyright
+
+Copyright &copy; 2021 The Graph Foundation
+
+Licensed under the [MIT license](LICENSE).
