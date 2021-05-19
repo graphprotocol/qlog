@@ -1,11 +1,29 @@
 This repo contains a tool to process and summarize the query logs that
-[graph-node](https://github.com/graphprotocol/graph-node) generates.
+[graph-node](https://github.com/graphprotocol/graph-node) generates. It can
+be used to
+
+* transform the textual log files that `graph-node` poduces into JSONL
+  files with one JSON object for each query. The input can either be the
+  raw log from `graph-node` or the log entries that Google Cloud's
+  Stackdriver emits. The JSONL files can then be used as input to
+  [agora](https://github.com/graphprotocol/agora/)
+* summarize query performance for similar queries to calculate basic
+  statistics like average and maximum query duration
+* sample query logs to generate a random sample of a larger logfile
 
 ## Installation
+
+You will need to have a [Rust toolchain installed ](https://rustup.rs/)
+Check out this repository, `cd` into the checkout and run
 
 ```
 cargo install --bins --path .
 ```
+
+The resulting binary will be placed into `~/.cargo/bin`. If you want to
+update an existing installation, you will also have to pass `--force` to
+`cargo`.
+
 
 ## Gathering query logs
 
@@ -178,6 +196,53 @@ do
 done
 printf "${summaries//\"}" > subgraph_daily_summary.csv
 ```
+
+### Format of the JSONL file
+
+The JSONL files that `qlog process --graphql` produces contain a list of
+JSON objects, one for each query that `graph-node` responded to with the
+following entries:
+
+* `subgraph`: the IPFS hash of the subgraph against which the query was run
+* `query_id`: the entry is in the form `<shape hash>-<query hash>` where
+  the shape hash is the hash of the query text when disregarding concrete
+  filter values in the query, so that a query with `first: 10` and one with
+  `first: 100` produce the same shape hash. THe `query hash` is the hash of
+  the query text and the variables passed to the query.
+* `block`: the number of the block against which the query was executed
+* `time`: how long processing the query took in ms
+* `query`: the text of the GraphQL query
+* `variables`: the variables used in the query as a string that is a JSON
+  object in its own right
+* `timestamp`: the server time when the query was run
+
+The summary JSONL files produced with `qlog process --summary` contain JSON
+objects with the following entries:
+
+* `query`: an example of the query being summarized. Queries are summarized
+  by their shape hash, i.e. the summary file contains one entry for each
+  unique shape in the original log file
+* `subgraph`: the IPFS hash of the subgraph
+* `calls`: the number of times this query shape was executed
+* `slow_count`: the number of executions of this query shape that took more
+  than 1s
+* `total_time`: the sum of the execution time of all queries being
+  summarized in ms
+* `time_squared`: the sum of the square of the execution time of queries in
+  ms^2
+* `max_time`: the time that the slowest execution of this query shape took
+  in ms
+* `max_uuid`: the `query_id` of a query that took `max_time` (it's called
+  `uuid` for historical reasons)
+* `max_variables`: the variables that were passed to the query when it took
+  `max_time`
+* `max_complexity`: meaningless; only there for historical reasons
+* `id`, `hash`: used by `qlog` for internal bookkeeping
+
+Average query execution time can be calculated from this data as
+`total_time / calls` and the standard deviation as `sqrt(time_squared /
+calls - (total_time/calls)^2)`
+
 
 ### Write to Postgres
 
